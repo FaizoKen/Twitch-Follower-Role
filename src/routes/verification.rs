@@ -10,15 +10,15 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 
 use crate::error::AppError;
-use crate::services::discord_oauth::{self, DiscordOAuth};
+use crate::services::session;
 use crate::services::sync::{self, UserSyncEvent};
 use crate::AppState;
 
-const SESSION_COOKIE: &str = "tcr_session";
+const SESSION_COOKIE: &str = "rl_session";
 
 fn get_session(jar: &CookieJar, secret: &str) -> Result<(String, String), AppError> {
     let cookie = jar.get(SESSION_COOKIE).ok_or(AppError::Unauthorized)?;
-    discord_oauth::verify_session(cookie.value(), secret)
+    session::verify_session(cookie.value(), secret)
         .ok_or(AppError::Unauthorized)
 }
 
@@ -142,29 +142,11 @@ pub async fn verify_page(State(state): State<Arc<AppState>>) -> Response {
 }
 
 pub async fn login(State(state): State<Arc<AppState>>) -> Result<Redirect, AppError> {
-    let state_token: String = {
-        let mut rng = rand::thread_rng();
-        (0..32)
-            .map(|_| {
-                let idx = rng.gen_range(0..36);
-                if idx < 10 {
-                    (b'0' + idx) as char
-                } else {
-                    (b'a' + idx - 10) as char
-                }
-            })
-            .collect()
-    };
-
-    sqlx::query(
-        "INSERT INTO oauth_states (state, redirect_data, expires_at) VALUES ($1, $2, now() + interval '10 minutes')",
-    )
-    .bind(&state_token)
-    .bind(json!({"type": "discord_login"}))
-    .execute(&state.pool)
-    .await?;
-
-    let url = DiscordOAuth::authorize_url(&state.config, &state_token);
+    let return_to = "/twitch-follower-role/verify";
+    let url = format!(
+        "/auth/login?return_to={}",
+        urlencoding::encode(return_to),
+    );
     Ok(Redirect::temporary(&url))
 }
 
@@ -172,73 +154,6 @@ pub async fn login(State(state): State<Arc<AppState>>) -> Result<Redirect, AppEr
 pub struct CallbackQuery {
     pub code: String,
     pub state: String,
-}
-
-pub async fn callback(
-    State(state): State<Arc<AppState>>,
-    Query(query): Query<CallbackQuery>,
-    jar: CookieJar,
-) -> Result<(CookieJar, Redirect), AppError> {
-    // Validate state
-    let deleted = sqlx::query(
-        "DELETE FROM oauth_states WHERE state = $1 AND expires_at > now()",
-    )
-    .bind(&query.state)
-    .execute(&state.pool)
-    .await?;
-
-    if deleted.rows_affected() == 0 {
-        return Err(AppError::BadRequest("Invalid or expired OAuth state".into()));
-    }
-
-    let oauth = DiscordOAuth::with_client(state.oauth_http.clone());
-    let (access_token, refresh_token) = oauth.exchange_code(&state.config, &query.code).await?;
-    let (discord_id, display_name) = oauth.get_user(&access_token).await?;
-    let guilds = oauth.get_user_guilds(&access_token).await?;
-
-    // Store refresh token
-    if let Some(rt) = refresh_token {
-        sqlx::query(
-            "INSERT INTO discord_tokens (discord_id, refresh_token) VALUES ($1, $2) \
-             ON CONFLICT (discord_id) DO UPDATE SET refresh_token = $2",
-        )
-        .bind(&discord_id)
-        .bind(&rt)
-        .execute(&state.pool)
-        .await?;
-    }
-
-    // Update guild memberships
-    let mut tx = state.pool.begin().await?;
-    sqlx::query("DELETE FROM user_guilds WHERE discord_id = $1")
-        .bind(&discord_id)
-        .execute(&mut *tx)
-        .await?;
-
-    if !guilds.is_empty() {
-        let guild_ids: Vec<&str> = guilds.iter().map(|(id, _)| id.as_str()).collect();
-        let guild_names: Vec<&str> = guilds.iter().map(|(_, name)| name.as_str()).collect();
-        sqlx::query(
-            "INSERT INTO user_guilds (discord_id, guild_id, guild_name, updated_at) \
-             SELECT $1, UNNEST($2::text[]), UNNEST($3::text[]), now()",
-        )
-        .bind(&discord_id)
-        .bind(&guild_ids)
-        .bind(&guild_names)
-        .execute(&mut *tx)
-        .await?;
-    }
-    tx.commit().await?;
-
-    // Create session cookie
-    let session_value = discord_oauth::sign_session(&discord_id, &display_name, &state.config.session_secret);
-    let cookie = Cookie::build((SESSION_COOKIE, session_value))
-        .path("/")
-        .http_only(true)
-        .max_age(time::Duration::hours(1))
-        .build();
-
-    Ok((jar.add(cookie), Redirect::temporary("/verify")))
 }
 
 pub async fn status(
@@ -392,7 +307,7 @@ pub async fn twitch_callback(
         "Account linked"
     );
 
-    Ok(Redirect::temporary("/verify"))
+    Ok(Redirect::temporary("/twitch-follower-role/verify"))
 }
 
 pub async fn unlink(

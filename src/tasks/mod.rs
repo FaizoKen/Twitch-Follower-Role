@@ -1,5 +1,4 @@
 pub mod config_sync_worker;
-pub mod guild_refresh_worker;
 pub mod refresh_worker;
 pub mod user_sync_worker;
 

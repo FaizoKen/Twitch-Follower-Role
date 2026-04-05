@@ -27,7 +27,7 @@ pub struct AppState {
     pub config_sync_tx: mpsc::Sender<ConfigSyncEvent>,
     pub twitch_client: TwitchClient,
     pub rl_client: RoleLogicClient,
-    pub oauth_http: reqwest::Client,
+    pub http: reqwest::Client,
     pub verify_html: bytes::Bytes,
 }
 
@@ -58,10 +58,10 @@ async fn main() {
         &app_config.twitch_eventsub_secret,
     );
     let rl_client = RoleLogicClient::new();
-    let oauth_http = reqwest::Client::builder()
+    let http = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(10))
         .build()
-        .expect("Failed to build OAuth HTTP client");
+        .expect("Failed to build HTTP client");
     let verify_html =
         bytes::Bytes::from(routes::verification::render_verify_page(&app_config.base_url));
 
@@ -72,7 +72,7 @@ async fn main() {
         config_sync_tx,
         twitch_client,
         rl_client,
-        oauth_http,
+        http,
         verify_html,
     });
 
@@ -80,39 +80,32 @@ async fn main() {
     tokio::spawn(tasks::refresh_worker::run(Arc::clone(&state)));
     tokio::spawn(tasks::user_sync_worker::run(user_sync_rx, Arc::clone(&state)));
     tokio::spawn(tasks::config_sync_worker::run(config_sync_rx, Arc::clone(&state)));
-    tokio::spawn(tasks::guild_refresh_worker::run(Arc::clone(&state)));
     tokio::spawn(tasks::cleanup_expired(Arc::clone(&state)));
 
     let app = Router::new()
-        // Plugin endpoints (called by RoleLogic)
-        .route("/register", post(routes::plugin::register))
-        .route("/config", get(routes::plugin::get_config))
-        .route("/config", post(routes::plugin::post_config))
-        .route("/config", delete(routes::plugin::delete_config))
-        // Verification endpoints (user-facing)
-        .route("/verify", get(routes::verification::verify_page))
-        .route("/verify/login", get(routes::verification::login))
-        .route("/verify/callback", get(routes::verification::callback))
-        .route("/verify/status", get(routes::verification::status))
-        .route("/verify/twitch", get(routes::verification::twitch_login))
-        .route(
-            "/verify/twitch/callback",
-            get(routes::verification::twitch_callback),
+        .nest("/twitch-follower-role", Router::new()
+            // Plugin endpoints (called by RoleLogic)
+            .route("/register", post(routes::plugin::register))
+            .route("/config", get(routes::plugin::get_config))
+            .route("/config", post(routes::plugin::post_config))
+            .route("/config", delete(routes::plugin::delete_config))
+            // Verification endpoints (user-facing)
+            .route("/verify", get(routes::verification::verify_page))
+            .route("/verify/login", get(routes::verification::login))
+            .route("/verify/status", get(routes::verification::status))
+            .route("/verify/twitch", get(routes::verification::twitch_login))
+            .route("/verify/twitch/callback", get(routes::verification::twitch_callback))
+            .route("/verify/unlink", post(routes::verification::unlink))
+            .route("/verify/logout", post(routes::verification::logout))
+            // Broadcaster connection
+            .route("/connect", get(routes::broadcaster::connect))
+            .route("/connect/callback", get(routes::broadcaster::connect_callback))
+            // EventSub webhook
+            .route("/webhooks/twitch", post(routes::webhooks::eventsub_handler))
+            // Health & static
+            .route("/favicon.ico", get(routes::health::favicon))
+            .route("/health", get(routes::health::health))
         )
-        .route("/verify/unlink", post(routes::verification::unlink))
-        .route("/verify/logout", post(routes::verification::logout))
-        // Broadcaster connection
-        .route("/connect", get(routes::broadcaster::connect))
-        .route(
-            "/connect/callback",
-            get(routes::broadcaster::connect_callback),
-        )
-        // EventSub webhook
-        .route("/webhooks/twitch", post(routes::webhooks::eventsub_handler))
-        // Health & static
-        .route("/favicon.ico", get(routes::health::favicon))
-        .route("/health", get(routes::health::health))
-        // Middleware
         .layer(TraceLayer::new_for_http())
         .layer(CorsLayer::permissive())
         .with_state(state);
