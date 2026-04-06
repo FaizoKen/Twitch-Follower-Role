@@ -2,10 +2,12 @@
 
 A [RoleLogic](https://rolelogic.faizo.net) plugin that assigns Discord roles based on Twitch channel follow and subscription status. Users link their Discord and Twitch accounts, then roles are automatically assigned based on configurable conditions (follower status, follow tenure, subscription tier).
 
+> **Requires [Auth Gateway](../Auth-Gateway/)** — Discord login is handled by the centralized Auth Gateway. This plugin reads the shared `rl_session` cookie set by the gateway. Twitch OAuth for account linking is handled directly by this plugin.
+
 ## How it works
 
 1. **Registers** guild/role pairs via the RoleLogic plugin API
-2. **Authenticates** users through Discord OAuth
+2. **Authenticates** users through the centralized Auth Gateway (Discord OAuth)
 3. **Links** Twitch accounts via Twitch OAuth
 4. **Connects** the channel broadcaster to enable EventSub webhooks
 5. **Monitors** follow/subscribe events in real-time via Twitch EventSub
@@ -20,18 +22,16 @@ cp .env.example .env
 
 ### Environment Variables
 
-| Variable                | Required | Default                                  | Description                        |
-| ----------------------- | -------- | ---------------------------------------- | ---------------------------------- |
-| `DATABASE_URL`          | Yes      | —                                        | PostgreSQL connection string       |
-| `DISCORD_CLIENT_ID`     | Yes      | —                                        | Discord OAuth app ID               |
-| `DISCORD_CLIENT_SECRET` | Yes      | —                                        | Discord OAuth app secret           |
-| `SESSION_SECRET`        | Yes      | —                                        | Secret for session HMAC signing    |
-| `TWITCH_CLIENT_ID`      | Yes      | —                                        | Twitch API app client ID           |
-| `TWITCH_CLIENT_SECRET`  | Yes      | —                                        | Twitch API app client secret       |
-| `TWITCH_EVENTSUB_SECRET`| Yes      | —                                        | HMAC secret for EventSub webhooks  |
-| `BASE_URL`              | Yes      | —                                        | Public HTTPS URL for redirects     |
-| `LISTEN_ADDR`           | No       | `0.0.0.0:8080`                           | Server bind address                |
-| `RUST_LOG`              | No       | `twitch_follower_role=info,tower_http=info` | Log level                       |
+| Variable                | Required | Default                                     | Description                        |
+| ----------------------- | -------- | ------------------------------------------- | ---------------------------------- |
+| `DATABASE_URL`          | Yes      | --                                          | PostgreSQL connection string       |
+| `SESSION_SECRET`        | Yes      | --                                          | HMAC key for `rl_session` cookie (must match Auth Gateway) |
+| `TWITCH_CLIENT_ID`      | Yes      | --                                          | Twitch API app client ID           |
+| `TWITCH_CLIENT_SECRET`  | Yes      | --                                          | Twitch API app client secret       |
+| `TWITCH_EVENTSUB_SECRET`| Yes      | --                                          | HMAC secret for EventSub webhooks  |
+| `BASE_URL`              | Yes      | --                                          | Full URL with prefix, e.g. `https://your-domain.com/twitch-follower-role` |
+| `LISTEN_ADDR`           | No       | `0.0.0.0:8080`                              | Server bind address                |
+| `RUST_LOG`              | No       | `twitch_follower_role=info,tower_http=info` | Log level                          |
 
 ## Run
 
@@ -50,24 +50,25 @@ cargo build --release  # production
 
 ## Endpoints
 
-| Method   | Path                      | Description                          |
-| -------- | ------------------------- | ------------------------------------ |
-| `GET`    | `/health`                 | Health check                         |
-| `POST`   | `/register`               | Register a guild/role pair           |
-| `GET`    | `/config`                 | Get plugin configuration schema      |
-| `POST`   | `/config`                 | Update role link conditions          |
-| `DELETE` | `/config`                 | Delete a registration                |
-| `GET`    | `/verify`                 | Verification page                    |
-| `GET`    | `/verify/login`           | Discord OAuth login                  |
-| `GET`    | `/verify/callback`        | Discord OAuth callback               |
-| `GET`    | `/verify/status`          | Check linked account status          |
-| `GET`    | `/verify/twitch`          | Twitch OAuth login                   |
-| `GET`    | `/verify/twitch/callback` | Twitch OAuth callback                |
-| `POST`   | `/verify/unlink`          | Unlink Twitch account                |
-| `POST`   | `/verify/logout`          | Logout session                       |
-| `GET`    | `/connect`                | Broadcaster connection page          |
-| `GET`    | `/connect/callback`       | Broadcaster OAuth callback           |
-| `POST`   | `/webhooks/twitch`        | Twitch EventSub webhook receiver     |
+All routes are nested under `/twitch-follower-role`:
+
+| Method   | Path                      | Description                              |
+| -------- | ------------------------- | ---------------------------------------- |
+| `GET`    | `/health`                 | Health check                             |
+| `POST`   | `/register`               | Register a guild/role pair               |
+| `GET`    | `/config`                 | Get plugin configuration schema          |
+| `POST`   | `/config`                 | Update role link conditions              |
+| `DELETE` | `/config`                 | Delete a registration                    |
+| `GET`    | `/verify`                 | Verification page                        |
+| `GET`    | `/verify/login`           | Redirects to Auth Gateway for Discord login |
+| `GET`    | `/verify/status`          | Check linked account status              |
+| `GET`    | `/verify/twitch`          | Twitch OAuth login                       |
+| `GET`    | `/verify/twitch/callback` | Twitch OAuth callback                    |
+| `POST`   | `/verify/unlink`          | Unlink Twitch account                    |
+| `POST`   | `/verify/logout`          | Logout session                           |
+| `GET`    | `/connect`                | Broadcaster connection page              |
+| `GET`    | `/connect/callback`       | Broadcaster OAuth callback               |
+| `POST`   | `/webhooks/twitch`        | Twitch EventSub webhook receiver         |
 
 ## Conditions
 
@@ -82,10 +83,11 @@ Admins can configure these conditions per role link (all enabled conditions must
 
 ## Usage
 
-1. In the RoleLogic dashboard, create a Role Link and set the **Custom Plugin URL** to your instance's public URL
-2. The channel owner connects their Twitch account via the `/connect` page
-3. Users visit the verification page, sign in with Discord, and link their Twitch account
-4. Roles are assigned automatically based on the conditions you configure
+1. Ensure the [Auth Gateway](../Auth-Gateway/) is running on `your-domain.com/auth/*`
+2. In the RoleLogic dashboard, create a Role Link and set the **Custom Plugin URL** to `https://your-domain.com/twitch-follower-role`
+3. The channel owner connects their Twitch account via the `/connect` page
+4. Users visit the verification page, sign in with Discord (via Auth Gateway), and link their Twitch account
+5. Roles are assigned automatically based on the conditions you configure
 
 ## API Reference
 
