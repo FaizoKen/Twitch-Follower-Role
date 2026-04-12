@@ -144,7 +144,7 @@ pub async fn connect_callback(
     );
 
     // Populate cache entries for all linked users in this guild
-    sync::populate_cache_for_broadcaster(&broadcaster.id, &guild_id, &state.pool).await?;
+    sync::populate_cache_for_broadcaster(&broadcaster.id, &guild_id, &state).await?;
 
     // Create EventSub subscriptions (best-effort, non-blocking)
     let state_clone = Arc::clone(&state);

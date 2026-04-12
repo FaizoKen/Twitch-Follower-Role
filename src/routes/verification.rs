@@ -290,7 +290,7 @@ pub async fn twitch_callback(
     }
 
     // Populate cache entries for all active broadcasters in this user's guilds
-    sync::populate_cache_for_user(&discord_id, &twitch_user.id, &state.pool).await?;
+    sync::populate_cache_for_user(&discord_id, &twitch_user.id, &state).await?;
 
     // Trigger sync
     let _ = state

@@ -46,8 +46,7 @@ pub async fn run(mut rx: mpsc::Receiver<ConfigSyncEvent>, state: Arc<AppState>) 
             if let Err(e) = sync::sync_for_role_link(
                 guild_id,
                 role_id,
-                &state.pool,
-                &state.rl_client,
+                &state,
             )
             .await
             {

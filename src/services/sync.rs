@@ -5,8 +5,9 @@ use sqlx::PgPool;
 
 use crate::error::AppError;
 use crate::models::condition::TwitchConditions;
+use crate::services::auth_gateway;
 use crate::services::condition_eval::{evaluate, CacheData};
-use crate::services::rolelogic::RoleLogicClient;
+use crate::AppState;
 
 /// Events sent to the user sync worker (lightweight, per-user).
 #[derive(Debug, Clone)]
@@ -27,9 +28,11 @@ pub struct ConfigSyncEvent {
 /// Evaluates conditions locally, then executes RoleLogic API calls concurrently.
 pub async fn sync_for_user(
     discord_id: &str,
-    pool: &PgPool,
-    rl_client: &RoleLogicClient,
+    state: &AppState,
 ) -> Result<(), AppError> {
+    let pool = &state.pool;
+    let rl_client = &state.rl_client;
+
     // Get user's Twitch ID
     let twitch_user_id = sqlx::query_scalar::<_, String>(
         "SELECT twitch_user_id FROM linked_accounts WHERE discord_id = $1",
@@ -42,15 +45,27 @@ pub async fn sync_for_user(
         return Ok(());
     };
 
+    // Get guild IDs from Auth Gateway
+    let guild_ids = auth_gateway::fetch_user_guild_ids(
+        &state.http,
+        &state.config.auth_gateway_url,
+        &state.config.internal_api_key,
+        discord_id,
+    )
+    .await?;
+
+    if guild_ids.is_empty() {
+        return Ok(());
+    }
+
     // Get role links only for guilds this user is a member of,
     // and that have a broadcaster connected
     let role_links = sqlx::query_as::<_, (String, String, String, sqlx::types::Json<TwitchConditions>, String)>(
         "SELECT rl.guild_id, rl.role_id, rl.api_token, rl.conditions, rl.broadcaster_id \
          FROM role_links rl \
-         JOIN user_guilds ug ON ug.guild_id = rl.guild_id \
-         WHERE ug.discord_id = $1 AND rl.broadcaster_id IS NOT NULL",
+         WHERE rl.guild_id = ANY($1) AND rl.broadcaster_id IS NOT NULL",
     )
-    .bind(discord_id)
+    .bind(&guild_ids[..])
     .fetch_all(pool)
     .await?;
 
@@ -258,9 +273,11 @@ enum ConditionBind {
 pub async fn sync_for_role_link(
     guild_id: &str,
     role_id: &str,
-    pool: &PgPool,
-    rl_client: &RoleLogicClient,
+    state: &AppState,
 ) -> Result<(), AppError> {
+    let pool = &state.pool;
+    let rl_client = &state.rl_client;
+
     let link = sqlx::query_as::<_, (String, sqlx::types::Json<TwitchConditions>, Option<String>)>(
         "SELECT api_token, conditions, broadcaster_id FROM role_links WHERE guild_id = $1 AND role_id = $2",
     )
@@ -284,6 +301,24 @@ pub async fn sync_for_role_link(
         return Ok(());
     };
 
+    let member_ids = auth_gateway::fetch_guild_member_ids(
+        &state.http,
+        &state.config.auth_gateway_url,
+        &state.config.internal_api_key,
+        guild_id,
+    )
+    .await?;
+
+    if member_ids.is_empty() {
+        rl_client.replace_users(guild_id, role_id, &[], &api_token).await?;
+        let mut tx = pool.begin().await?;
+        sqlx::query("DELETE FROM role_assignments WHERE guild_id = $1 AND role_id = $2")
+            .bind(guild_id).bind(role_id)
+            .execute(&mut *tx).await?;
+        tx.commit().await?;
+        return Ok(());
+    }
+
     // Query the user limit from RoleLogic
     let (_user_count, user_limit) = rl_client
         .get_user_info(guild_id, role_id, &api_token)
@@ -293,9 +328,9 @@ pub async fn sync_for_role_link(
     // Build SQL WHERE clause from conditions
     let (where_clause, binds) = build_condition_where(&conditions);
 
-    // Dynamic bind indexes: binds... + broadcaster_id + guild_id + limit
+    // Dynamic bind indexes: binds... + broadcaster_id + member_ids + limit
     let broadcaster_bind_idx = binds.len() + 1;
-    let guild_bind_idx = binds.len() + 2;
+    let members_bind_idx = binds.len() + 2;
     let limit_bind_idx = binds.len() + 3;
 
     let query_str = format!(
@@ -303,8 +338,8 @@ pub async fn sync_for_role_link(
          FROM linked_accounts la \
          JOIN user_channel_cache ucc ON ucc.twitch_user_id = la.twitch_user_id \
            AND ucc.broadcaster_id = ${broadcaster_bind_idx} \
-         JOIN user_guilds ug ON ug.discord_id = la.discord_id AND ug.guild_id = ${guild_bind_idx} \
-         WHERE {where_clause} \
+         WHERE la.discord_id = ANY(${members_bind_idx}::text[]) \
+           AND ({where_clause}) \
          ORDER BY la.linked_at ASC \
          LIMIT ${limit_bind_idx}",
     );
@@ -313,7 +348,7 @@ pub async fn sync_for_role_link(
         &query_str,
         &binds,
         &broadcaster_id,
-        guild_id,
+        &member_ids,
         user_limit,
         pool,
     )
@@ -325,10 +360,10 @@ pub async fn sync_for_role_link(
             "SELECT COUNT(*) FROM linked_accounts la \
              JOIN user_channel_cache ucc ON ucc.twitch_user_id = la.twitch_user_id \
                AND ucc.broadcaster_id = ${broadcaster_bind_idx} \
-             JOIN user_guilds ug ON ug.discord_id = la.discord_id AND ug.guild_id = ${guild_bind_idx} \
-             WHERE {where_clause}",
+             WHERE la.discord_id = ANY(${members_bind_idx}::text[]) \
+               AND ({where_clause})",
         );
-        let total: i64 = exec_condition_count(&count_query, &binds, &broadcaster_id, guild_id, pool)
+        let total: i64 = exec_condition_count(&count_query, &binds, &broadcaster_id, &member_ids, pool)
             .await
             .unwrap_or(qualifying_ids.len() as i64);
         if total as usize > user_limit {
@@ -372,7 +407,7 @@ async fn exec_condition_query(
     query: &str,
     binds: &[ConditionBind],
     broadcaster_id: &str,
-    guild_id: &str,
+    member_ids: &[String],
     limit: usize,
     pool: &PgPool,
 ) -> Result<Vec<String>, AppError> {
@@ -383,7 +418,7 @@ async fn exec_condition_query(
         };
     }
     q = q.bind(broadcaster_id);
-    q = q.bind(guild_id);
+    q = q.bind(member_ids);
     q = q.bind(limit as i64);
 
     Ok(q.fetch_all(pool).await?)
@@ -393,7 +428,7 @@ async fn exec_condition_count(
     query: &str,
     binds: &[ConditionBind],
     broadcaster_id: &str,
-    guild_id: &str,
+    member_ids: &[String],
     pool: &PgPool,
 ) -> Result<i64, AppError> {
     let mut q = sqlx::query_scalar::<_, i64>(query);
@@ -403,16 +438,18 @@ async fn exec_condition_count(
         };
     }
     q = q.bind(broadcaster_id);
-    q = q.bind(guild_id);
+    q = q.bind(member_ids);
     Ok(q.fetch_one(pool).await?)
 }
 
 /// Remove a user from all role assignments (after account unlink).
 pub async fn remove_all_assignments(
     discord_id: &str,
-    pool: &PgPool,
-    rl_client: &RoleLogicClient,
+    state: &AppState,
 ) -> Result<(), AppError> {
+    let pool = &state.pool;
+    let rl_client = &state.rl_client;
+
     let assignments = sqlx::query_as::<_, (String, String, String)>(
         "SELECT ra.guild_id, ra.role_id, rl.api_token \
          FROM role_assignments ra \
@@ -447,19 +484,30 @@ pub async fn remove_all_assignments(
 pub async fn populate_cache_for_user(
     discord_id: &str,
     twitch_user_id: &str,
-    pool: &PgPool,
+    state: &AppState,
 ) -> Result<(), AppError> {
+    let guild_ids = auth_gateway::fetch_user_guild_ids(
+        &state.http,
+        &state.config.auth_gateway_url,
+        &state.config.internal_api_key,
+        discord_id,
+    )
+    .await?;
+
+    if guild_ids.is_empty() {
+        return Ok(());
+    }
+
     sqlx::query(
         "INSERT INTO user_channel_cache (twitch_user_id, broadcaster_id) \
          SELECT $1, rl.broadcaster_id \
-         FROM user_guilds ug \
-         JOIN role_links rl ON rl.guild_id = ug.guild_id \
-         WHERE ug.discord_id = $2 AND rl.broadcaster_id IS NOT NULL \
+         FROM role_links rl \
+         WHERE rl.guild_id = ANY($2) AND rl.broadcaster_id IS NOT NULL \
          ON CONFLICT DO NOTHING",
     )
     .bind(twitch_user_id)
-    .bind(discord_id)
-    .execute(pool)
+    .bind(&guild_ids[..])
+    .execute(&state.pool)
     .await?;
 
     Ok(())
@@ -469,18 +517,30 @@ pub async fn populate_cache_for_user(
 pub async fn populate_cache_for_broadcaster(
     broadcaster_id: &str,
     guild_id: &str,
-    pool: &PgPool,
+    state: &AppState,
 ) -> Result<(), AppError> {
+    let member_ids = auth_gateway::fetch_guild_member_ids(
+        &state.http,
+        &state.config.auth_gateway_url,
+        &state.config.internal_api_key,
+        guild_id,
+    )
+    .await?;
+
+    if member_ids.is_empty() {
+        return Ok(());
+    }
+
     sqlx::query(
         "INSERT INTO user_channel_cache (twitch_user_id, broadcaster_id) \
          SELECT la.twitch_user_id, $1 \
          FROM linked_accounts la \
-         JOIN user_guilds ug ON ug.discord_id = la.discord_id AND ug.guild_id = $2 \
+         WHERE la.discord_id = ANY($2::text[]) \
          ON CONFLICT DO NOTHING",
     )
     .bind(broadcaster_id)
-    .bind(guild_id)
-    .execute(pool)
+    .bind(&member_ids[..])
+    .execute(&state.pool)
     .await?;
 
     Ok(())

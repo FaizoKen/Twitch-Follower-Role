@@ -2,6 +2,7 @@
 name = "twitch-follower-role"
 version = "0.1.0"
 edition = "2021"
+default-run = "twitch-follower-role"
 
 [dependencies]
 axum = { version = "0.8", features = ["macros"] }
