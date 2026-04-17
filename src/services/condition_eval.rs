@@ -11,7 +11,11 @@ pub struct CacheData {
 
 /// Evaluate whether a user meets the configured conditions.
 /// This function is synchronous, pure, and fast (no I/O).
+/// If neither follower nor subscriber is required, the role is unconfigured — grant to nobody.
 pub fn evaluate(conditions: &TwitchConditions, cache: &CacheData) -> bool {
+    if !conditions.require_follower && !conditions.require_subscriber {
+        return false;
+    }
     if conditions.require_follower {
         if !cache.is_following {
             return false;
@@ -52,10 +56,10 @@ mod tests {
     }
 
     #[test]
-    fn empty_conditions_always_true() {
+    fn empty_conditions_grants_nobody() {
         let conditions = TwitchConditions::default();
         let cache = default_cache();
-        assert!(evaluate(&conditions, &cache));
+        assert!(!evaluate(&conditions, &cache));
     }
 
     #[test]
