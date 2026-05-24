@@ -57,11 +57,26 @@ pub fn render_verify_page(base_url: &str) -> String {
         .msg-success {{ background: #052e16; color: #86efac; border: 1px solid #14532d; }}
         .hidden {{ display: none; }}
         .actions {{ display: flex; gap: 10px; margin-top: 14px; flex-wrap: wrap; }}
+        .guild-ctx {{ display: none; align-items: center; gap: 10px; background: #052e16; border: 1px solid #14532d; color: #86efac; padding: 8px 14px; border-radius: 8px; margin: 12px 0 6px; font-size: 13px; line-height: 1.5; }}
+        .guild-ctx.show {{ display: flex; }}
+        .guild-ctx.warn {{ background: #1c1208; border-color: #422006; color: #fbbf24; }}
+        .guild-ctx .gctx-icon {{ flex-shrink: 0; }}
+        .guild-ctx .gctx-name {{ color: #fff; font-weight: 600; }}
+        .manage-link {{ font-size: 13px; color: #94a3b8; margin-top: 14px; }}
+        .manage-link a {{ color: #bf94ff; }}
     </style>
 </head>
 <body>
     <h1>Twitch Follower Role</h1>
     <p class="subtitle">Link your Discord and Twitch accounts</p>
+
+    <!-- Server context banner: only shown when ?guild=<id> is present in the URL.
+         Lets a server admin share a per-guild link that both verifies the user
+         AND auto-enables the role for that specific server in one shot. -->
+    <div id="guild-ctx" class="guild-ctx">
+        <svg class="gctx-icon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
+        <span id="guild-ctx-text"></span>
+    </div>
 
     <div id="loading" class="card"><p>Loading...</p></div>
     <div id="login" class="card hidden">
@@ -82,6 +97,10 @@ pub fn render_verify_page(base_url: &str) -> String {
         <p>Logged in as <strong id="discord-name2"></strong> <span class="badge badge-ok">Discord</span></p>
         <p>Twitch: <strong id="twitch-name"></strong> <span class="badge badge-ok">Linked</span></p>
         <p style="margin-top:8px; color:#86efac; font-size:13px;">Your accounts are linked. Roles will be assigned automatically based on your Twitch channel status.</p>
+        <p class="manage-link">
+            Receiving Twitch roles in servers you didn't intend?
+            <a href="/auth/my_servers?from=/twitch-follower-role/verify">Choose which servers receive roles →</a>
+        </p>
         <div class="actions">
             <button onclick="doUnlink()" class="btn btn-danger">Unlink Twitch</button>
             <button onclick="doLogout()" class="btn btn-secondary">Logout</button>
@@ -90,6 +109,116 @@ pub fn render_verify_page(base_url: &str) -> String {
     <div id="error" class="msg msg-error hidden"></div>
 
     <script>
+    const PLUGIN_SLUG = 'twitch-follower-role';
+    let isLinked = false;
+
+    // Optional ?guild=<id> tells us the user came from a per-guild verify
+    // link an admin shared in their Discord. We use it to (a) show a
+    // contextual banner so the user knows which server this is for and
+    // (b) automatically clear any existing opt-out (both per-plugin and
+    // the guild-wide master) once they're authenticated — so a returning
+    // user who'd previously disabled this server doesn't have to find
+    // /auth/my_servers to re-enable it.
+    const guildId = (() => {{
+        try {{
+            const v = new URLSearchParams(window.location.search).get('guild');
+            return v && /^[0-9]{{5,25}}$/.test(v) ? v : '';
+        }} catch (e) {{ return ''; }}
+    }})();
+
+    // Preserve the guild context across both OAuth round-trips so an
+    // unauth visitor who logs in lands back on this same per-guild URL.
+    // The Discord login link bypasses our server-side `login()` shim and
+    // hits the gateway directly with a per-guild `return_to`; the Twitch
+    // link gets `?guild=<id>` so `twitch_login()` can stash it on the
+    // oauth_state and the callback redirects back here with it intact.
+    (function patchAuthLinks() {{
+        if (!guildId) return;
+        const discordLink = document.querySelector('#login a.btn-discord');
+        if (discordLink) {{
+            const returnTo = '/twitch-follower-role/verify?guild=' + encodeURIComponent(guildId);
+            discordLink.href = '/auth/login?return_to=' + encodeURIComponent(returnTo);
+        }}
+        const twitchLink = document.querySelector('#link-twitch a.btn-twitch');
+        if (twitchLink) {{
+            twitchLink.href = '{base_url}/verify/twitch?guild=' + encodeURIComponent(guildId);
+        }}
+    }})();
+
+    // Gateway-absolute API helper for /auth/* (cookie-authed via the
+    // shared rl_session). Doesn't prefix with the plugin's base_url.
+    async function gatewayApi(method, path, body) {{
+        const opts = {{ method, headers: {{}}, credentials: 'include' }};
+        if (body) {{
+            opts.headers['Content-Type'] = 'application/json';
+            opts.body = JSON.stringify(body);
+        }}
+        const res = await fetch(path, opts);
+        const data = await res.json().catch(() => ({{}}));
+        if (!res.ok) throw new Error(data.error || 'Request failed');
+        return data;
+    }}
+
+    function showGuildCtx(text, isWarning) {{
+        const el = document.getElementById('guild-ctx');
+        document.getElementById('guild-ctx-text').innerHTML = text;
+        el.classList.toggle('warn', !!isWarning);
+        el.classList.add('show');
+    }}
+
+    // Resolve guildId → display name via the gateway, then clear any
+    // opt-out blocking this plugin from assigning roles in that server.
+    // Idempotent: clearing rows that don't exist is a no-op on the server.
+    async function applyGuildContext() {{
+        if (!guildId) return;
+        let prefs;
+        try {{
+            prefs = await gatewayApi('GET', '/auth/preferences');
+        }} catch (e) {{
+            return;
+        }}
+        const g = (prefs.guilds || []).find(x => x.guild_id === guildId);
+        if (!g) {{
+            // Either the user isn't in that guild, or the gateway hasn't
+            // refreshed their guild list yet. Surface it gently — verify
+            // still works; the role just won't apply until they're a member.
+            showGuildCtx("You're not in that server yet — join it on Discord, then refresh.", true);
+            return;
+        }}
+        const safeName = (g.guild_name || '(unnamed server)')
+            .replace(/[&<>"']/g, c => ({{'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}})[c]);
+        const wasDisabled = g.master_optout || (g.plugin_optouts || []).includes(PLUGIN_SLUG);
+        // Always clear both — the master toggle wins over per-plugin
+        // overrides, so we need to remove it too even if only the
+        // per-plugin row was set on this server.
+        try {{
+            if (g.master_optout) {{
+                await gatewayApi('POST', '/auth/preferences', {{
+                    guild_id: guildId, plugin: null, enabled: true,
+                }});
+            }}
+            if ((g.plugin_optouts || []).includes(PLUGIN_SLUG)) {{
+                await gatewayApi('POST', '/auth/preferences', {{
+                    guild_id: guildId, plugin: PLUGIN_SLUG, enabled: true,
+                }});
+            }}
+        }} catch (e) {{
+            // Even if the clear failed, still show the banner so the user
+            // knows where they are. The role will simply not apply until
+            // they fix it manually via /auth/my_servers.
+        }}
+        const nameHtml = '<span class="gctx-name">' + safeName + '</span>';
+        if (wasDisabled) {{
+            showGuildCtx(isLinked
+                ? 'Enabled Twitch roles for ' + nameHtml + ' — roles apply on the next sync.'
+                : 'Enabled Twitch roles for ' + nameHtml + ' — finish linking below to receive roles.');
+        }} else {{
+            showGuildCtx(isLinked
+                ? 'Twitch roles are active in ' + nameHtml + '.'
+                : 'Once linked, Twitch roles will apply in ' + nameHtml + '.');
+        }}
+    }}
+
     async function init() {{
         try {{
             const r = await fetch('{base_url}/verify/status', {{credentials:'include'}});
@@ -101,10 +230,13 @@ pub fn render_verify_page(base_url: &str) -> String {
                 document.getElementById('discord-name').textContent = d.discord_name;
                 document.getElementById('link-twitch').classList.remove('hidden');
             }} else {{
+                isLinked = true;
                 document.getElementById('discord-name2').textContent = d.discord_name;
                 document.getElementById('twitch-name').textContent = d.twitch_login;
                 document.getElementById('linked').classList.remove('hidden');
             }}
+            // Session is valid — apply the per-guild side effects (if any).
+            if (d.discord_id) applyGuildContext();
         }} catch(e) {{
             document.getElementById('loading').classList.add('hidden');
             document.getElementById('login').classList.remove('hidden');
@@ -188,8 +320,29 @@ pub async fn status(
     }
 }
 
-pub async fn twitch_login(State(state): State<Arc<AppState>>, jar: CookieJar) -> Result<Redirect, AppError> {
+#[derive(Deserialize)]
+pub struct TwitchLoginQuery {
+    pub guild: Option<String>,
+}
+
+pub async fn twitch_login(
+    State(state): State<Arc<AppState>>,
+    jar: CookieJar,
+    Query(query): Query<TwitchLoginQuery>,
+) -> Result<Redirect, AppError> {
     let (discord_id, _) = get_session(&jar, &state.config.session_secret)?;
+
+    // Carry `?guild=<id>` through the Twitch OAuth round-trip so the
+    // verify page lands back on its per-guild URL and can apply the
+    // opt-out clear / banner after the link succeeds. Validate it's a
+    // Discord snowflake (digits only, 5-25 chars) before persisting.
+    let guild_id = query.guild.as_deref().and_then(|g| {
+        if (5..=25).contains(&g.len()) && g.chars().all(|c| c.is_ascii_digit()) {
+            Some(g.to_string())
+        } else {
+            None
+        }
+    });
 
     let state_token: String = {
         let mut rng = rand::thread_rng();
@@ -209,7 +362,7 @@ pub async fn twitch_login(State(state): State<Arc<AppState>>, jar: CookieJar) ->
         "INSERT INTO oauth_states (state, redirect_data, expires_at) VALUES ($1, $2, now() + interval '10 minutes')",
     )
     .bind(&state_token)
-    .bind(json!({"type": "twitch_user", "discord_id": discord_id}))
+    .bind(json!({"type": "twitch_user", "discord_id": discord_id, "guild_id": guild_id}))
     .execute(&state.pool)
     .await?;
 
@@ -241,6 +394,7 @@ pub async fn twitch_callback(
         .as_str()
         .ok_or(AppError::Internal("Missing discord_id in state".into()))?
         .to_string();
+    let guild_id = oauth_state.0["guild_id"].as_str().map(String::from);
 
     // Exchange code for token
     let redirect_uri = state.config.twitch_user_oauth_redirect_uri();
@@ -307,7 +461,11 @@ pub async fn twitch_callback(
         "Account linked"
     );
 
-    Ok(Redirect::temporary("/twitch-follower-role/verify"))
+    let redirect_to = match guild_id {
+        Some(g) => format!("/twitch-follower-role/verify?guild={}", g),
+        None => "/twitch-follower-role/verify".to_string(),
+    };
+    Ok(Redirect::temporary(&redirect_to))
 }
 
 pub async fn unlink(

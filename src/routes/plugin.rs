@@ -72,7 +72,15 @@ pub async fn get_config(
 
     let (guild_id, role_id, conditions, broadcaster_id, broadcaster_login) = link;
 
-    let verify_url = format!("{}/verify", state.config.base_url);
+    // Per-guild verify URL. The `?guild=<id>` query param is what the
+    // verify page reads to (a) show "Verifying for <Server>" context and
+    // (b) auto-clear any existing opt-out so users who previously
+    // disabled this server are re-enrolled in one click — no detour
+    // through /auth/my_servers, no re-verifying.
+    //
+    // Guild IDs are Discord snowflakes (digits only) so they're safe to
+    // splice directly into the query string without percent-encoding.
+    let verify_url = format!("{}/verify?guild={}", state.config.base_url, guild_id);
     let connect_url = format!(
         "{}/connect?guild_id={}&role_id={}",
         state.config.base_url, guild_id, role_id
