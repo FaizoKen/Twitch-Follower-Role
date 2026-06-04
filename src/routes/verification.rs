@@ -64,6 +64,7 @@ pub fn render_verify_page(base_url: &str) -> String {
         .guild-ctx .gctx-name {{ color: #fff; font-weight: 600; }}
         .manage-link {{ font-size: 13px; color: #94a3b8; margin-top: 14px; }}
         .manage-link a {{ color: #bf94ff; }}
+        .refresh-note {{ font-size: 13px; color: #94a3b8; margin-top: 10px; min-height: 18px; transition: color .15s; }}
     </style>
 </head>
 <body>
@@ -97,11 +98,13 @@ pub fn render_verify_page(base_url: &str) -> String {
         <p>Logged in as <strong id="discord-name2"></strong> <span class="badge badge-ok">Discord</span></p>
         <p>Twitch: <strong id="twitch-name"></strong> <span class="badge badge-ok">Linked</span></p>
         <p style="margin-top:8px; color:#86efac; font-size:13px;">Your accounts are linked. Roles will be assigned automatically based on your Twitch channel status.</p>
+        <p id="refresh-note" class="refresh-note"></p>
         <p class="manage-link">
             Receiving Twitch roles in servers you didn't intend?
             <a href="/auth/my_servers?from=/twitch-follower-role/verify">Choose which servers receive roles →</a>
         </p>
         <div class="actions">
+            <button onclick="doRefresh(false)" class="btn btn-secondary">Re-check now</button>
             <button onclick="doUnlink()" class="btn btn-danger">Unlink Twitch</button>
             <button onclick="doLogout()" class="btn btn-secondary">Logout</button>
         </div>
@@ -234,6 +237,9 @@ pub fn render_verify_page(base_url: &str) -> String {
                 document.getElementById('discord-name2').textContent = d.discord_name;
                 document.getElementById('twitch-name').textContent = d.twitch_login;
                 document.getElementById('linked').classList.remove('hidden');
+                // Visiting the page re-checks your latest follow/sub status so
+                // roles self-correct without an unlink/re-link. Best-effort.
+                doRefresh(true);
             }}
             // Session is valid — apply the per-guild side effects (if any).
             if (d.discord_id) applyGuildContext();
@@ -242,6 +248,37 @@ pub fn render_verify_page(base_url: &str) -> String {
             document.getElementById('login').classList.remove('hidden');
         }}
     }}
+    // Nudge the server to re-fetch this user's Twitch data ahead of schedule.
+    // `silent` is used for the automatic call on page load — it shows the
+    // working/result note but stays quiet on transient errors. The explicit
+    // "Re-check now" button passes false so failures surface.
+    let refreshing = false;
+    async function doRefresh(silent) {{
+        const note = document.getElementById('refresh-note');
+        if (!note || refreshing) return;
+        refreshing = true;
+        note.style.color = '#94a3b8';
+        note.textContent = 'Checking your latest follow / subscription status…';
+        try {{
+            const r = await fetch('{base_url}/verify/refresh', {{method:'POST', credentials:'include'}});
+            const d = await r.json().catch(() => ({{}}));
+            if (!r.ok) throw new Error(d.error || 'Request failed');
+            note.style.color = '#86efac';
+            note.textContent = d.refreshed
+                ? '✓ Re-checking now — your roles update within a minute.'
+                : '✓ Your status is already up to date.';
+        }} catch (e) {{
+            if (silent) {{
+                note.textContent = '';
+            }} else {{
+                note.style.color = '#fca5a5';
+                note.textContent = 'Could not refresh right now — try again shortly.';
+            }}
+        }} finally {{
+            refreshing = false;
+        }}
+    }}
+
     async function doUnlink() {{
         if (!confirm('Unlink your Twitch account? You will lose all roles assigned by this plugin.')) return;
         const r = await fetch('{base_url}/verify/unlink', {{method:'POST', credentials:'include'}});
@@ -500,4 +537,38 @@ pub async fn logout(jar: CookieJar) -> (CookieJar, Json<Value>) {
         .build();
 
     (jar.remove(cookie), Json(json!({"success": true})))
+}
+
+/// Per-user floor between member-triggered re-checks. The refresh worker
+/// already rate-limits Twitch API calls; this just stops a page reload loop
+/// from re-forcing a check the worker only just completed.
+const REFRESH_COOLDOWN_SECS: f64 = 60.0;
+
+/// Member-triggered "re-check my data now". When a linked user opens the
+/// verify page the page calls this so their follow/subscription status across
+/// every connected broadcaster gets re-fetched ahead of schedule and their
+/// roles are corrected — no unlink/re-link needed. We don't fetch inline
+/// (that would bypass the rate limiter); we just bring `next_fetch_at`
+/// forward for the user's cache rows that aren't already fresh, and the
+/// refresh worker re-syncs roles after it re-checks.
+pub async fn refresh(
+    State(state): State<Arc<AppState>>,
+    jar: CookieJar,
+) -> Result<Json<Value>, AppError> {
+    let (discord_id, _) = get_session(&jar, &state.config.session_secret)?;
+
+    let affected = sqlx::query(
+        "UPDATE user_channel_cache ucc SET next_fetch_at = now() \
+         FROM linked_accounts la \
+         WHERE la.discord_id = $1 \
+           AND ucc.twitch_user_id = la.twitch_user_id \
+           AND (ucc.fetched_at IS NULL OR ucc.fetched_at < now() - make_interval(secs => $2))",
+    )
+    .bind(&discord_id)
+    .bind(REFRESH_COOLDOWN_SECS)
+    .execute(&state.pool)
+    .await?
+    .rows_affected();
+
+    Ok(Json(json!({ "refreshed": affected > 0 })))
 }

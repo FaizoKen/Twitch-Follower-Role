@@ -93,6 +93,7 @@ async fn main() {
             .route("/verify", get(routes::verification::verify_page))
             .route("/verify/login", get(routes::verification::login))
             .route("/verify/status", get(routes::verification::status))
+            .route("/verify/refresh", post(routes::verification::refresh))
             .route("/verify/twitch", get(routes::verification::twitch_login))
             .route("/verify/twitch/callback", get(routes::verification::twitch_callback))
             .route("/verify/unlink", post(routes::verification::unlink))
