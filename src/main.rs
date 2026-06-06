@@ -118,6 +118,10 @@ async fn main() {
             )
             .route("/admin/{guild_id}/role/{role_id}/connect", post(routes::admin::broadcaster_connect))
             .route("/admin/{guild_id}/role/{role_id}/disconnect", post(routes::admin::broadcaster_disconnect))
+            // Per-guild settings + public linked-users list
+            .route("/admin/{guild_id}/view-permission", post(routes::users::set_view_permission))
+            .route("/users/{guild_id}", get(routes::users::users_page))
+            .route("/users/{guild_id}/data", get(routes::users::users_data))
             // Verification endpoints (user-facing)
             .route("/verify", get(routes::verification::verify_page))
             .route("/verify/login", get(routes::verification::login))

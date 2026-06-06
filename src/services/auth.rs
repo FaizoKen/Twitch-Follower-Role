@@ -16,12 +16,24 @@ use crate::services::rl_token;
 use crate::services::session::verify_session;
 use crate::AppState;
 
+/// Plugin slug sent to the Auth Gateway when filtering guild members. Must
+/// match the URL prefix this plugin is mounted under.
+const PLUGIN_SLUG: &str = "twitch-follower-role";
+
 #[derive(Debug, Deserialize)]
 struct GuildPermissionResp {
     #[serde(default)]
     is_member: bool,
     #[serde(default)]
     is_manager: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct GuildMembersResp {
+    #[serde(default)]
+    discord_ids: Vec<String>,
+    #[serde(default)]
+    guild_name: Option<String>,
 }
 
 /// Classify a non-success Auth Gateway HTTP response.
@@ -155,4 +167,94 @@ pub async fn require_guild_admin(
         return Ok(s.discord_id);
     }
     require_manager(state, jar, guild_id).await
+}
+
+pub struct GuildPermission {
+    /// Resolved caller identity — carried for future per-user gating even
+    /// though the users-page gate only reads the flags.
+    #[allow(dead_code)]
+    pub discord_id: String,
+    pub is_member: bool,
+    pub is_manager: bool,
+}
+
+/// Resolve the caller's (member, manager) flags for a guild. Used by the
+/// public users-list page, which gates on `guild_settings.view_permission`.
+pub async fn guild_permission(
+    state: &Arc<AppState>,
+    jar: &CookieJar,
+    guild_id: &str,
+) -> Result<GuildPermission, AppError> {
+    let (discord_id, _) = read_session(jar, &state.config.session_secret)?;
+    let cookie_val = encoded_session_cookie(jar);
+
+    let url = format!(
+        "{}/auth/guild_permission?guild_id={guild_id}",
+        state.config.auth_gateway_url
+    );
+    let resp = state
+        .http
+        .get(&url)
+        .header("Cookie", cookie_val)
+        .send()
+        .await
+        .map_err(|e| AppError::Internal(format!("auth_gateway permission request: {e}")))?;
+    let status = resp.status();
+    if !status.is_success() {
+        let body = resp.text().await.unwrap_or_default();
+        return Err(classify_gateway_status(
+            status,
+            &body,
+            &state.config.auth_gateway_url,
+        ));
+    }
+    let parsed: GuildPermissionResp = resp
+        .json()
+        .await
+        .map_err(|e| AppError::Internal(format!("auth_gateway response not JSON: {e}")))?;
+    Ok(GuildPermission {
+        discord_id,
+        is_member: parsed.is_member,
+        is_manager: parsed.is_manager,
+    })
+}
+
+/// Fetch the Auth Gateway's current member list + display name for `guild_id`,
+/// authenticated with the viewer's `rl_session` cookie. The gateway only
+/// returns the list when the caller is themselves a member, which blocks
+/// arbitrary guild enumeration. The `plugin` filter drops members who opted
+/// out of this plugin. One call returns both the membership filter and name.
+pub async fn guild_members(
+    state: &Arc<AppState>,
+    jar: &CookieJar,
+    guild_id: &str,
+) -> Result<(Vec<String>, Option<String>), AppError> {
+    read_session(jar, &state.config.session_secret)?;
+    let cookie_val = encoded_session_cookie(jar);
+
+    let url = format!(
+        "{}/auth/guild_members?guild_id={guild_id}&plugin={PLUGIN_SLUG}",
+        state.config.auth_gateway_url
+    );
+    let resp = state
+        .http
+        .get(&url)
+        .header("Cookie", cookie_val)
+        .send()
+        .await
+        .map_err(|e| AppError::Internal(format!("auth_gateway members request: {e}")))?;
+    let status = resp.status();
+    if !status.is_success() {
+        let body = resp.text().await.unwrap_or_default();
+        return Err(classify_gateway_status(
+            status,
+            &body,
+            &state.config.auth_gateway_url,
+        ));
+    }
+    let parsed: GuildMembersResp = resp
+        .json()
+        .await
+        .map_err(|e| AppError::Internal(format!("auth_gateway response not JSON: {e}")))?;
+    Ok((parsed.discord_ids, parsed.guild_name))
 }

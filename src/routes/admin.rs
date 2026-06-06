@@ -476,6 +476,15 @@ pub async fn role_config_data(
     let (broadcaster_id, broadcaster_login, rule_tree, rule_tree_version) = link;
     let tree: RuleTree = serde_json::from_value(rule_tree).unwrap_or_default();
 
+    // Surface the public users-list settings here so admins discover the
+    // feature: without this they'd never see the public page exists.
+    let view_permission: String =
+        sqlx::query_scalar("SELECT view_permission FROM guild_settings WHERE guild_id = $1")
+            .bind(&guild_id)
+            .fetch_optional(&state.pool)
+            .await?
+            .unwrap_or_else(|| "managers".to_string());
+
     // Per-guild verify URL: `?guild=<id>` lets the verify page show server
     // context and auto-clear any opt-out for this server in one click. Guild
     // IDs are Discord snowflakes (digits only) so they need no encoding.
@@ -499,6 +508,10 @@ pub async fn role_config_data(
             "max_conditions_per_group": MAX_CONDITIONS_PER_GROUP,
         },
         "verify_url": format!("{}/verify?guild={}", state.config.base_url, guild_id),
+        "users": {
+            "url": format!("{}/users/{}", state.config.base_url, guild_id),
+            "view_permission": view_permission,
+        },
     })))
 }
 

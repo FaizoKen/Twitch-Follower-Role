@@ -69,6 +69,9 @@ All routes are nested under `/twitch-follower-role`:
 | `GET`/`POST` | `/admin/{guild}/role/{role}/preview`   | Dry-run match count (saved / proposed rule)          |
 | `POST`   | `/admin/{guild}/role/{role}/connect`       | Start broadcaster OAuth for this role link           |
 | `POST`   | `/admin/{guild}/role/{role}/disconnect`    | Detach the broadcaster from this role link           |
+| `POST`   | `/admin/{guild}/view-permission`           | Set who can view the public users list                |
+| `GET`    | `/users/{guild}`                           | Public linked-users list page                         |
+| `GET`    | `/users/{guild}/data`                      | Users-list data (gated by `view_permission`)          |
 | `GET`    | `/verify`                                  | Member verification page                             |
 | `GET`    | `/verify/login`                            | Redirects to Auth Gateway for Discord login          |
 | `GET`    | `/verify/status`                           | Check linked account status                          |
@@ -102,6 +105,16 @@ full DNF builder (OR of AND-groups). A rule matches a member if they satisfy
 The **"Anyone who linked their Twitch"** preset is channel-agnostic — it grants
 the role to every member who has linked a Twitch account, no channel required.
 Every other rule needs a connected channel; without one it grants to nobody.
+
+## Public users page
+
+The config iframe also exposes an optional, shareable **`/users/{guild}`** page:
+a read-only, searchable/filterable list of every linked member in the server and
+their relationship (follower / subscriber / tier) to the connected channel.
+Visibility is set per guild via `guild_settings.view_permission` — `disabled`,
+`managers` (Manage-Server only, the default), or `members` (any member). The
+page itself authenticates with the `rl_session` cookie; on 401 it renders an
+in-page "Sign in with Discord" prompt rather than auto-redirecting.
 
 ## Usage
 

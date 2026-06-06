@@ -43,6 +43,13 @@ pub async fn register(
     .execute(&state.pool)
     .await?;
 
+    // Ensure a settings row exists so the users-page visibility control has
+    // somewhere to read/write (defaults to 'managers').
+    sqlx::query("INSERT INTO guild_settings (guild_id) VALUES ($1) ON CONFLICT (guild_id) DO NOTHING")
+        .bind(&body.guild_id)
+        .execute(&state.pool)
+        .await?;
+
     tracing::info!(
         guild_id = body.guild_id,
         role_id = body.role_id,
