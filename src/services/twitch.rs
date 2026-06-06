@@ -78,8 +78,10 @@ impl TwitchClient {
             .build()
             .expect("Failed to build HTTP client");
 
-        // ~4 requests per second (well within Twitch's 800 points/min)
-        let quota = Quota::per_second(NonZeroU32::new(4).unwrap());
+        // ~8 requests per second — still well within Twitch's 800 points/min,
+        // with headroom so a verify spike (each linker triggers an inline
+        // follow + sub check) drains quickly instead of serializing.
+        let quota = Quota::per_second(NonZeroU32::new(8).unwrap());
         let rate_limiter = Arc::new(RateLimiter::direct(quota));
 
         Self {

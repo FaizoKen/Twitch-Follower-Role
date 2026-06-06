@@ -12,6 +12,17 @@ const MAX_REFRESH_SECS: i64 = 86400; // 24 hour cap
 const INTERVAL_CACHE_SECS: u64 = 300; // recompute every 5 minutes
 const INACTIVE_MULTIPLIER: i64 = 6;
 
+/// A freshly linked user we don't yet see as following/subscribed is re-checked
+/// this often, so a just-made follow/sub — or one Twitch's API was briefly slow
+/// to surface — lands the role within a minute or two instead of waiting for the
+/// normal (slow) inactive cadence.
+pub const FAST_RETRY_SECS: i64 = 90;
+
+/// How long after linking the fast re-check window stays open. After this, a
+/// user who still doesn't qualify falls back to the normal cadence so someone
+/// who links but never follows/subs stops costing API budget.
+pub const FAST_RETRY_WINDOW_SECS: i64 = 600;
+
 struct CachedInterval {
     value: AtomicI64,
     last_computed: Mutex<Instant>,
@@ -62,12 +73,14 @@ pub async fn run(state: Arc<AppState>) {
         state.twitch_client.wait_for_permit().await;
 
         // Pick next stale cache entry
-        let next = sqlx::query_as::<_, (String, String, bool)>(
+        let next = sqlx::query_as::<_, (String, String, bool, chrono::DateTime<chrono::Utc>)>(
             "SELECT ucc.twitch_user_id, ucc.broadcaster_id, \
              EXISTS(SELECT 1 FROM role_assignments ra \
                JOIN linked_accounts la ON la.discord_id = ra.discord_id \
-               WHERE la.twitch_user_id = ucc.twitch_user_id) as is_active \
+               WHERE la.twitch_user_id = ucc.twitch_user_id) as is_active, \
+             la2.linked_at \
              FROM user_channel_cache ucc \
+             JOIN linked_accounts la2 ON la2.twitch_user_id = ucc.twitch_user_id \
              WHERE ucc.next_fetch_at <= now() \
              ORDER BY is_active DESC, ucc.fetch_failures ASC, ucc.next_fetch_at ASC \
              LIMIT 1",
@@ -75,7 +88,7 @@ pub async fn run(state: Arc<AppState>) {
         .fetch_optional(&state.pool)
         .await;
 
-        let (twitch_user_id, broadcaster_id, is_active) = match next {
+        let (twitch_user_id, broadcaster_id, is_active, linked_at) = match next {
             Ok(Some(row)) => row,
             Ok(None) => {
                 tracing::debug!("No cache entries due for refresh, sleeping 30s");
@@ -219,7 +232,17 @@ pub async fn run(state: Arc<AppState>) {
 
                 let base_interval = cached_interval.get(&state.pool).await;
                 let multiplier = if is_active { 1 } else { INACTIVE_MULTIPLIER };
-                let interval = base_interval * multiplier;
+                // Keep a freshly linked user who still doesn't follow/sub on the
+                // fast cadence (bounded to FAST_RETRY_WINDOW_SECS after linking) so
+                // a just-made / API-lagged follow or sub lands the role within a
+                // minute or two. Everyone else uses the normal cadence.
+                let within_fast_window =
+                    (chrono::Utc::now() - linked_at).num_seconds() < FAST_RETRY_WINDOW_SECS;
+                let interval = if !is_following && !is_subscribed && within_fast_window {
+                    FAST_RETRY_SECS
+                } else {
+                    base_interval * multiplier
+                };
                 let next_fetch = chrono::Utc::now() + chrono::Duration::seconds(interval);
 
                 if let Err(e) = sqlx::query(

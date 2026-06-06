@@ -16,6 +16,11 @@ use crate::AppState;
 
 const SESSION_COOKIE: &str = "rl_session";
 
+/// How far ahead to schedule the next background refresh after the inline check
+/// done at link time, when the user already qualifies (follows/subs). Matches
+/// the worker's 30-min floor so we don't immediately re-spend API budget.
+const INITIAL_RECHECK_SECS: i64 = 1800;
+
 fn get_session(jar: &CookieJar, secret: &str) -> Result<(String, String), AppError> {
     let cookie = jar.get(SESSION_COOKIE).ok_or(AppError::Unauthorized)?;
     session::verify_session(cookie.value(), secret)
@@ -483,13 +488,99 @@ pub async fn twitch_callback(
     // Populate cache entries for all active broadcasters in this user's guilds
     sync::populate_cache_for_user(&discord_id, &twitch_user.id, &state).await?;
 
-    // Trigger sync
-    let _ = state
-        .user_sync_tx
-        .send(UserSyncEvent::AccountLinked {
-            discord_id: discord_id.clone(),
-        })
-        .await;
+    // Inline follow/subscription check using the broadcaster tokens we already
+    // hold, so the role is granted within this request instead of waiting for
+    // the single, rate-limited refresh worker to reach this user (which lags
+    // badly when many people link at once). Best-effort per broadcaster: on any
+    // API error we leave the freshly-seeded cache row (next_fetch_at = now()) for
+    // the worker — which has full token-refresh handling — to retry.
+    let broadcasters = sqlx::query_as::<_, (String, String)>(
+        "SELECT DISTINCT ON (ucc.broadcaster_id) ucc.broadcaster_id, rl.broadcaster_access_token \
+         FROM user_channel_cache ucc \
+         JOIN role_links rl ON rl.broadcaster_id = ucc.broadcaster_id \
+         WHERE ucc.twitch_user_id = $1 AND rl.broadcaster_access_token IS NOT NULL \
+         ORDER BY ucc.broadcaster_id",
+    )
+    .bind(&twitch_user.id)
+    .fetch_all(&state.pool)
+    .await
+    .unwrap_or_default();
+
+    let mut inline_status_known = false;
+    for (broadcaster_id, token) in &broadcasters {
+        state.twitch_client.wait_for_permit().await;
+        let follower = state
+            .twitch_client
+            .check_follower(broadcaster_id, &twitch_user.id, token)
+            .await;
+        state.twitch_client.wait_for_permit().await;
+        let sub = state
+            .twitch_client
+            .check_subscription(broadcaster_id, &twitch_user.id, token)
+            .await;
+
+        if let (Ok(follower), Ok(sub)) = (follower, sub) {
+            let is_following = follower.is_some();
+            let followed_at = follower.map(|f| f.followed_at);
+            let is_subscribed = sub.is_some();
+            let sub_tier = sub.map(|s| s.tier).unwrap_or(0);
+            // If they don't qualify yet (linked before following/subscribing, or
+            // Twitch's API hasn't surfaced it), start the worker's fast re-check
+            // cadence so the role still lands within a minute or two.
+            let next_fetch = chrono::Utc::now()
+                + chrono::Duration::seconds(if is_following || is_subscribed {
+                    INITIAL_RECHECK_SECS
+                } else {
+                    crate::tasks::refresh_worker::FAST_RETRY_SECS
+                });
+            match sqlx::query(
+                "UPDATE user_channel_cache SET \
+                 is_following = $1, followed_at = $2, is_subscribed = $3, sub_tier = $4, \
+                 fetched_at = now(), next_fetch_at = $5, fetch_failures = 0 \
+                 WHERE twitch_user_id = $6 AND broadcaster_id = $7",
+            )
+            .bind(is_following)
+            .bind(followed_at)
+            .bind(is_subscribed)
+            .bind(sub_tier)
+            .bind(next_fetch)
+            .bind(&twitch_user.id)
+            .bind(broadcaster_id)
+            .execute(&state.pool)
+            .await
+            {
+                Ok(_) => inline_status_known = true,
+                Err(e) => tracing::error!(discord_id, broadcaster_id, "Inline cache update failed: {e}"),
+            }
+        } else {
+            tracing::warn!(
+                discord_id, broadcaster_id,
+                "Inline follow/sub check failed; deferring to worker"
+            );
+        }
+    }
+
+    // Apply roles now. When we know the live status, sync inline so the role is
+    // granted before the page reloads and a burst of linkers parallelizes across
+    // request tasks. Otherwise fall back to the worker event.
+    if inline_status_known {
+        if let Err(e) = sync::sync_for_user(&discord_id, &state).await {
+            tracing::error!(discord_id, "Inline role sync after link failed: {e}");
+            let _ = state
+                .user_sync_tx
+                .send(UserSyncEvent::AccountLinked {
+                    discord_id: discord_id.clone(),
+                })
+                .await;
+        }
+    } else {
+        let _ = state
+            .user_sync_tx
+            .send(UserSyncEvent::AccountLinked {
+                discord_id: discord_id.clone(),
+            })
+            .await;
+    }
 
     tracing::info!(
         discord_id,
