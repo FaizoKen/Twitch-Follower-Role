@@ -188,18 +188,17 @@ pub async fn run(state: Arc<AppState>) {
             .check_follower(&broadcaster_id, &twitch_user_id, &access_token)
             .await;
 
-        if is_twitch_unauthorized(&follower_result) {
-            if try_refresh_token(
+        if is_twitch_unauthorized(&follower_result)
+            && try_refresh_token(
                 &state, &mut access_token, &mut refresh_tok, &broadcaster_id, &mut token_refreshed,
             )
             .await
             .is_ok()
-            {
-                follower_result = state
-                    .twitch_client
-                    .check_follower(&broadcaster_id, &twitch_user_id, &access_token)
-                    .await;
-            }
+        {
+            follower_result = state
+                .twitch_client
+                .check_follower(&broadcaster_id, &twitch_user_id, &access_token)
+                .await;
         }
 
         // Check subscription status (with token refresh on 401)
@@ -209,18 +208,17 @@ pub async fn run(state: Arc<AppState>) {
             .check_subscription(&broadcaster_id, &twitch_user_id, &access_token)
             .await;
 
-        if is_twitch_unauthorized(&sub_result) {
-            if try_refresh_token(
+        if is_twitch_unauthorized(&sub_result)
+            && try_refresh_token(
                 &state, &mut access_token, &mut refresh_tok, &broadcaster_id, &mut token_refreshed,
             )
             .await
             .is_ok()
-            {
-                sub_result = state
-                    .twitch_client
-                    .check_subscription(&broadcaster_id, &twitch_user_id, &access_token)
-                    .await;
-            }
+        {
+            sub_result = state
+                .twitch_client
+                .check_subscription(&broadcaster_id, &twitch_user_id, &access_token)
+                .await;
         }
 
         match (follower_result, sub_result) {

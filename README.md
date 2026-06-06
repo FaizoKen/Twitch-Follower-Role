@@ -1,17 +1,18 @@
 # Twitch Follower Role
 
-A [RoleLogic](https://rolelogic.faizo.net) plugin that assigns Discord roles based on Twitch channel follow and subscription status. Users link their Discord and Twitch accounts, then roles are automatically assigned based on configurable conditions (follower status, follow tenure, subscription tier).
+A [RoleLogic](https://rolelogic.faizo.net) plugin that assigns Discord roles based on a member's relationship to a Twitch channel — follower, follow tenure, subscriber, and sub tier — composed into a **DNF rule tree** (OR of AND-groups) through an in-dashboard iframe rule builder. Admins can express rules like _"(follower for ≥30 days) OR (subscriber at Tier 2+)"_ without nesting.
 
 > **Requires [Auth Gateway](https://github.com/FaizoKen/Auth-Gateway)** — Discord login is handled by the centralized Auth Gateway. This plugin reads the shared `rl_session` cookie set by the gateway. Twitch OAuth for account linking is handled directly by this plugin.
 
 ## How it works
 
 1. **Registers** guild/role pairs via the RoleLogic plugin API
-2. **Authenticates** users through the centralized Auth Gateway (Discord OAuth)
-3. **Links** Twitch accounts via Twitch OAuth
-4. **Connects** the channel broadcaster to enable EventSub webhooks
-5. **Monitors** follow/subscribe events in real-time via Twitch EventSub
-6. **Syncs** role assignments to RoleLogic based on configurable conditions
+2. **Configures** rules through an iframe rule-builder embedded in the RoleLogic dashboard (preset chooser + advanced AND/OR builder, live match-count preview, in-iframe channel connect)
+3. **Authenticates** admins via a dual-mode gate: a RoleLogic `rl_token` JWT (iframe) or the `rl_session` cookie + an Auth-Gateway manager check (direct navigation)
+4. **Links** member Twitch accounts via Twitch OAuth
+5. **Connects** the channel broadcaster to enable EventSub webhooks
+6. **Monitors** follow/subscribe events in real-time via Twitch EventSub
+7. **Syncs** role assignments to RoleLogic by evaluating the rule tree (a Rust evaluator for per-user updates, a pushdown-SQL builder for bulk per-role-link re-sync)
 
 ## Setup
 
@@ -30,6 +31,9 @@ cp .env.example .env
 | `TWITCH_CLIENT_SECRET`   | Yes      | --                                          | Twitch API app client secret                                              |
 | `TWITCH_EVENTSUB_SECRET` | Yes      | --                                          | HMAC secret for EventSub webhooks                                         |
 | `BASE_URL`               | Yes      | --                                          | Full URL with prefix, e.g. `https://your-domain.com/twitch-follower-role` |
+| `INTERNAL_API_KEY`       | Yes      | --                                          | Shared secret for plugin → Auth Gateway `/auth/internal/*` calls           |
+| `AUTH_GATEWAY_URL`       | No       | derived from `BASE_URL` origin              | Auth Gateway base URL (set explicitly in local dev)                       |
+| `RL_DASHBOARD_ORIGIN`    | No       | `https://rolelogic.faizo.net`               | Origin allowed to embed the iframe (CSP `frame-ancestors`, CORS/CSRF)     |
 | `LISTEN_ADDR`            | No       | `0.0.0.0:8080`                              | Server bind address                                                       |
 | `RUST_LOG`               | No       | `twitch_follower_role=info,tower_http=info` | Log level                                                                 |
 
@@ -52,42 +56,60 @@ cargo build --release  # production
 
 All routes are nested under `/twitch-follower-role`:
 
-| Method   | Path                      | Description                                 |
-| -------- | ------------------------- | ------------------------------------------- |
-| `GET`    | `/health`                 | Health check                                |
-| `POST`   | `/register`               | Register a guild/role pair                  |
-| `GET`    | `/config`                 | Get plugin configuration schema             |
-| `POST`   | `/config`                 | Update role link conditions                 |
-| `DELETE` | `/config`                 | Delete a registration                       |
-| `GET`    | `/verify`                 | Verification page                           |
-| `GET`    | `/verify/login`           | Redirects to Auth Gateway for Discord login |
-| `GET`    | `/verify/status`          | Check linked account status                 |
-| `GET`    | `/verify/twitch`          | Twitch OAuth login                          |
-| `GET`    | `/verify/twitch/callback` | Twitch OAuth callback                       |
-| `POST`   | `/verify/unlink`          | Unlink Twitch account                       |
-| `POST`   | `/verify/logout`          | Logout session                              |
-| `GET`    | `/connect`                | Broadcaster connection page                 |
-| `GET`    | `/connect/callback`       | Broadcaster OAuth callback                  |
-| `POST`   | `/webhooks/twitch`        | Twitch EventSub webhook receiver            |
+| Method   | Path                                       | Description                                          |
+| -------- | ------------------------------------------ | ---------------------------------------------------- |
+| `GET`    | `/health`                                  | Health check                                         |
+| `POST`   | `/register`                                | Register a guild/role pair                           |
+| `GET`    | `/config`                                  | Returns the iframe embed config (UI mode)            |
+| `POST`   | `/config`                                  | No-op (iframe mode); token-verified for compliance   |
+| `DELETE` | `/config`                                  | Delete a registration                                |
+| `GET`    | `/admin/{guild}/role/{role}`               | Iframe rule-builder page (dual-mode auth)            |
+| `GET`    | `/admin/{guild}/role/{role}/data`          | Rule-builder data (config, channel, catalogs)        |
+| `POST`   | `/admin/{guild}/role/{role}/save`          | Save the rule tree (optimistic-locked)               |
+| `GET`/`POST` | `/admin/{guild}/role/{role}/preview`   | Dry-run match count (saved / proposed rule)          |
+| `POST`   | `/admin/{guild}/role/{role}/connect`       | Start broadcaster OAuth for this role link           |
+| `POST`   | `/admin/{guild}/role/{role}/disconnect`    | Detach the broadcaster from this role link           |
+| `GET`    | `/verify`                                  | Member verification page                             |
+| `GET`    | `/verify/login`                            | Redirects to Auth Gateway for Discord login          |
+| `GET`    | `/verify/status`                           | Check linked account status                          |
+| `POST`   | `/verify/refresh`                          | Member-triggered re-check of follow/sub status       |
+| `GET`    | `/verify/twitch`                           | Twitch OAuth login                                   |
+| `GET`    | `/verify/twitch/callback`                  | Twitch OAuth callback                                |
+| `POST`   | `/verify/unlink`                           | Unlink Twitch account                                |
+| `POST`   | `/verify/logout`                           | Logout session                                       |
+| `GET`    | `/connect/callback`                        | Broadcaster OAuth callback                            |
+| `POST`   | `/webhooks/twitch`                         | Twitch EventSub webhook receiver                     |
 
-## Conditions
+## Rule builder
 
-Admins can configure these conditions per role link (all enabled conditions must be met):
+Configuration happens inside the RoleLogic dashboard, in an embedded iframe. A
+preset chooser covers the common cases; an **Advanced rule** option exposes the
+full DNF builder (OR of AND-groups). A rule matches a member if they satisfy
+**any** group, and within a group **all** conditions must hold.
 
-| Condition              | Description                                          |
-| ---------------------- | ---------------------------------------------------- |
-| **Require Follower**   | User must be following the channel                   |
-| **Min Follow Days**    | Minimum days the user has been following (0+)        |
-| **Require Subscriber** | User must have an active subscription                |
-| **Min Sub Tier**       | Minimum subscription tier (1 = any, 2 = T2+, 3 = T3) |
+**Targets** (facts about a member's relationship to the connected channel):
+
+| Target              | Type | Meaning                                  |
+| ------------------- | ---- | ---------------------------------------- |
+| `is_follower`       | bool | Currently follows the channel            |
+| `follow_age_days`   | int  | Whole days since they first followed     |
+| `is_subscriber`     | bool | Has an active paid subscription          |
+| `sub_tier`          | int  | Subscription tier (1, 2, or 3)           |
+
+**Operators**: `equals`, `not equals`, `greater than`, `at least`, `less than`,
+`at most`, `between` (bool targets support `equals` only).
+
+The **"Anyone who linked their Twitch"** preset is channel-agnostic — it grants
+the role to every member who has linked a Twitch account, no channel required.
+Every other rule needs a connected channel; without one it grants to nobody.
 
 ## Usage
 
 1. Ensure the [Auth Gateway](https://github.com/FaizoKen/Auth-Gateway) is running on `your-domain.com/auth/*`
 2. In the RoleLogic dashboard, create a Role Link and set the **Custom Plugin URL** to `https://your-domain.com/twitch-follower-role`
-3. The channel owner connects their Twitch account via the `/connect` page
-4. Users visit the verification page, sign in with Discord (via Auth Gateway), and link their Twitch account
-5. Roles are assigned automatically based on the conditions you configure
+3. Open the role's plugin tab in the dashboard, pick who should get the role, and **Connect Twitch channel** right from the iframe
+4. Share the verify link (shown in the iframe) so members sign in with Discord and link their Twitch account
+5. Roles are assigned automatically by evaluating your rule, in real time as follow/sub events arrive
 
 ## API Reference
 

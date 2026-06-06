@@ -1,12 +1,14 @@
 use std::collections::HashSet;
 
 use futures_util::stream::{self, StreamExt};
+use serde_json::Value;
 use sqlx::PgPool;
 
 use crate::error::AppError;
-use crate::models::condition::TwitchConditions;
+use crate::models::rule::RuleTree;
 use crate::services::auth_gateway;
 use crate::services::condition_eval::{evaluate, CacheData};
+use crate::services::rule_sql::{self, Bind};
 use crate::AppState;
 
 /// Events sent to the user sync worker (lightweight, per-user).
@@ -24,16 +26,37 @@ pub struct ConfigSyncEvent {
     pub role_id: String,
 }
 
+/// Default facts for a viewer with no cache row yet — all false / unknown, so
+/// channel-scoped conditions fail closed exactly like the SQL builder's
+/// COALESCE/NULL handling.
+fn default_facts() -> CacheData {
+    CacheData {
+        is_following: false,
+        followed_at: None,
+        is_subscribed: false,
+        sub_tier: 0,
+    }
+}
+
+/// Whether a viewer qualifies for one role link, given the link's rule tree,
+/// its connected broadcaster (if any), and the viewer's cached facts.
+fn qualifies(tree: &RuleTree, broadcaster_id: Option<&str>, facts: Option<&CacheData>) -> bool {
+    if tree.grant_on_any_relation {
+        return true;
+    }
+    if broadcaster_id.is_none() || tree.groups.is_empty() {
+        return false;
+    }
+    let fallback = default_facts();
+    evaluate(tree, facts.unwrap_or(&fallback))
+}
+
 /// Sync roles for a single user across all guilds.
-/// Evaluates conditions locally, then executes RoleLogic API calls concurrently.
-pub async fn sync_for_user(
-    discord_id: &str,
-    state: &AppState,
-) -> Result<(), AppError> {
+/// Evaluates the rule tree locally, then executes RoleLogic API calls concurrently.
+pub async fn sync_for_user(discord_id: &str, state: &AppState) -> Result<(), AppError> {
     let pool = &state.pool;
     let rl_client = &state.rl_client;
 
-    // Get user's Twitch ID
     let twitch_user_id = sqlx::query_scalar::<_, String>(
         "SELECT twitch_user_id FROM linked_accounts WHERE discord_id = $1",
     )
@@ -45,7 +68,6 @@ pub async fn sync_for_user(
         return Ok(());
     };
 
-    // Get guild IDs from Auth Gateway
     let guild_ids = auth_gateway::fetch_user_guild_ids(
         &state.http,
         &state.config.auth_gateway_url,
@@ -58,12 +80,11 @@ pub async fn sync_for_user(
         return Ok(());
     }
 
-    // Get role links only for guilds this user is a member of,
-    // and that have a broadcaster connected
-    let role_links = sqlx::query_as::<_, (String, String, String, sqlx::types::Json<TwitchConditions>, String)>(
-        "SELECT rl.guild_id, rl.role_id, rl.api_token, rl.conditions, rl.broadcaster_id \
-         FROM role_links rl \
-         WHERE rl.guild_id = ANY($1) AND rl.broadcaster_id IS NOT NULL",
+    // All role links in the user's guilds. No broadcaster filter — a
+    // `grant_on_any_relation` link needs no channel.
+    let role_links = sqlx::query_as::<_, (String, String, String, Value, Option<String>)>(
+        "SELECT rl.guild_id, rl.role_id, rl.api_token, rl.rule_tree, rl.broadcaster_id \
+         FROM role_links rl WHERE rl.guild_id = ANY($1)",
     )
     .bind(&guild_ids[..])
     .fetch_all(pool)
@@ -73,7 +94,7 @@ pub async fn sync_for_user(
         return Ok(());
     }
 
-    // Get all cached data for this user across all broadcasters
+    // Cached (broadcaster_id → facts) for this user across all channels.
     let cache_rows = sqlx::query_as::<_, (String, bool, Option<chrono::DateTime<chrono::Utc>>, bool, i32)>(
         "SELECT broadcaster_id, is_following, followed_at, is_subscribed, sub_tier \
          FROM user_channel_cache WHERE twitch_user_id = $1",
@@ -97,7 +118,6 @@ pub async fn sync_for_user(
         })
         .collect();
 
-    // Get existing assignments
     let existing: HashSet<(String, String)> = sqlx::query_as::<_, (String, String)>(
         "SELECT guild_id, role_id FROM role_assignments WHERE discord_id = $1",
     )
@@ -107,7 +127,6 @@ pub async fn sync_for_user(
     .into_iter()
     .collect();
 
-    // Phase 1: evaluate conditions locally (no I/O)
     enum Action {
         Add {
             guild_id: String,
@@ -122,14 +141,14 @@ pub async fn sync_for_user(
     }
 
     let mut actions: Vec<Action> = Vec::new();
-    for (guild_id, role_id, api_token, conditions, broadcaster_id) in &role_links {
-        let cache = cache_map.get(broadcaster_id.as_str());
-        let qualifies = match cache {
-            Some(c) => evaluate(conditions, c),
-            None => false, // No cache data yet
-        };
+    for (guild_id, role_id, api_token, rule_tree, broadcaster_id) in &role_links {
+        let tree: RuleTree = serde_json::from_value(rule_tree.clone()).unwrap_or_default();
+        let facts = broadcaster_id
+            .as_deref()
+            .and_then(|bid| cache_map.get(bid));
+        let q = qualifies(&tree, broadcaster_id.as_deref(), facts);
         let currently_assigned = existing.contains(&(guild_id.clone(), role_id.clone()));
-        match (qualifies, currently_assigned) {
+        match (q, currently_assigned) {
             (true, false) => actions.push(Action::Add {
                 guild_id: guild_id.clone(),
                 role_id: role_id.clone(),
@@ -148,7 +167,6 @@ pub async fn sync_for_user(
         return Ok(());
     }
 
-    // Phase 2: execute API calls concurrently (max 10 parallel)
     let discord_id_owned = discord_id.to_string();
     stream::iter(actions)
         .for_each_concurrent(10, |action| {
@@ -241,46 +259,8 @@ pub async fn sync_for_user(
     Ok(())
 }
 
-/// Build a SQL WHERE clause from TwitchConditions for SQL-side filtering.
-/// All conditions map to columns on user_channel_cache (no JSONB parsing).
-fn build_condition_where(conditions: &TwitchConditions) -> (String, Vec<ConditionBind>) {
-    let mut clauses: Vec<String> = Vec::new();
-    let mut binds: Vec<ConditionBind> = Vec::new();
-
-    if conditions.require_follower {
-        clauses.push("ucc.is_following = true".to_string());
-        if conditions.min_follow_days > 0 {
-            let idx = binds.len() + 1;
-            clauses.push(format!(
-                "ucc.followed_at <= now() - make_interval(days => ${idx})"
-            ));
-            binds.push(ConditionBind::Int(conditions.min_follow_days));
-        }
-    }
-
-    if conditions.require_subscriber {
-        clauses.push("ucc.is_subscribed = true".to_string());
-        if conditions.min_sub_tier > 0 {
-            let idx = binds.len() + 1;
-            clauses.push(format!("ucc.sub_tier >= ${idx}"));
-            binds.push(ConditionBind::Int((conditions.min_sub_tier as i64) * 1000));
-        }
-    }
-
-    if clauses.is_empty() {
-        return ("TRUE".to_string(), vec![]);
-    }
-
-    (clauses.join(" AND "), binds)
-}
-
-enum ConditionBind {
-    Int(i64),
-}
-
 /// Re-evaluate all users for a specific role link (after config change).
-/// Uses SQL-side filtering on user_channel_cache columns.
-/// Uses atomic PUT to replace entire user list.
+/// Pushes the rule down into SQL and replaces the entire user list atomically.
 pub async fn sync_for_role_link(
     guild_id: &str,
     role_id: &str,
@@ -289,52 +269,24 @@ pub async fn sync_for_role_link(
     let pool = &state.pool;
     let rl_client = &state.rl_client;
 
-    let link = sqlx::query_as::<_, (String, sqlx::types::Json<TwitchConditions>, Option<String>)>(
-        "SELECT api_token, conditions, broadcaster_id FROM role_links WHERE guild_id = $1 AND role_id = $2",
+    let link = sqlx::query_as::<_, (String, Value, Option<String>)>(
+        "SELECT api_token, rule_tree, broadcaster_id FROM role_links WHERE guild_id = $1 AND role_id = $2",
     )
     .bind(guild_id)
     .bind(role_id)
     .fetch_optional(pool)
     .await?;
 
-    let Some((api_token, conditions, broadcaster_id)) = link else {
+    let Some((api_token, rule_tree, broadcaster_id)) = link else {
         return Ok(());
     };
+    let tree: RuleTree = serde_json::from_value(rule_tree).unwrap_or_default();
 
-    let Some(broadcaster_id) = broadcaster_id else {
-        // No broadcaster connected, clear assignments
-        match rl_client.upload_users(guild_id, role_id, &[], &api_token).await {
-            Ok(_) => {}
-            Err(AppError::RoleLinkNotFound) => {
-                delete_orphan_role_link(guild_id, role_id, pool).await;
-                return Ok(());
-            }
-            Err(e) => return Err(e),
-        }
-        sqlx::query("DELETE FROM role_assignments WHERE guild_id = $1 AND role_id = $2")
-            .bind(guild_id)
-            .bind(role_id)
-            .execute(pool)
-            .await?;
-        return Ok(());
-    };
-
-    // Role is unconfigured when neither follower nor subscriber is required.
-    if !conditions.require_follower && !conditions.require_subscriber {
-        match rl_client.upload_users(guild_id, role_id, &[], &api_token).await {
-            Ok(_) => {}
-            Err(AppError::RoleLinkNotFound) => {
-                delete_orphan_role_link(guild_id, role_id, pool).await;
-                return Ok(());
-            }
-            Err(e) => return Err(e),
-        }
-        sqlx::query("DELETE FROM role_assignments WHERE guild_id = $1 AND role_id = $2")
-            .bind(guild_id)
-            .bind(role_id)
-            .execute(pool)
-            .await?;
-        return Ok(());
+    // Unconfigured, or a channel-scoped rule with no broadcaster connected →
+    // grant to nobody. (grant_on_any_relation is channel-agnostic and handled
+    // below, so it does NOT hit this clear path.)
+    if !tree.grant_on_any_relation && (tree.groups.is_empty() || broadcaster_id.is_none()) {
+        return clear_role(guild_id, role_id, &api_token, state).await;
     }
 
     let member_ids = auth_gateway::fetch_guild_member_ids(
@@ -346,26 +298,11 @@ pub async fn sync_for_role_link(
     .await?;
 
     if member_ids.is_empty() {
-        match rl_client.upload_users(guild_id, role_id, &[], &api_token).await {
-            Ok(_) => {}
-            Err(AppError::RoleLinkNotFound) => {
-                delete_orphan_role_link(guild_id, role_id, pool).await;
-                return Ok(());
-            }
-            Err(e) => return Err(e),
-        }
-        let mut tx = pool.begin().await?;
-        sqlx::query("DELETE FROM role_assignments WHERE guild_id = $1 AND role_id = $2")
-            .bind(guild_id).bind(role_id)
-            .execute(&mut *tx).await?;
-        tx.commit().await?;
-        return Ok(());
+        return clear_role(guild_id, role_id, &api_token, state).await;
     }
 
-    // Query the user limit from RoleLogic
-    let (_user_count, user_limit) = match rl_client
-        .get_user_info(guild_id, role_id, &api_token)
-        .await
+    // RoleLogic user limit (caps the qualifying set).
+    let (_user_count, user_limit) = match rl_client.get_user_info(guild_id, role_id, &api_token).await
     {
         Ok(v) => v,
         Err(AppError::RoleLinkNotFound) => {
@@ -375,56 +312,51 @@ pub async fn sync_for_role_link(
         Err(_) => (0, 100),
     };
 
-    // Build SQL WHERE clause from conditions
-    let (where_clause, binds) = build_condition_where(&conditions);
-
-    // Dynamic bind indexes: binds... + broadcaster_id + member_ids + limit
-    let broadcaster_bind_idx = binds.len() + 1;
-    let members_bind_idx = binds.len() + 2;
-    let limit_bind_idx = binds.len() + 3;
-
-    let query_str = format!(
-        "SELECT la.discord_id \
-         FROM linked_accounts la \
-         JOIN user_channel_cache ucc ON ucc.twitch_user_id = la.twitch_user_id \
-           AND ucc.broadcaster_id = ${broadcaster_bind_idx} \
-         WHERE la.discord_id = ANY(${members_bind_idx}::text[]) \
-           AND ({where_clause}) \
-         ORDER BY la.linked_at ASC \
-         LIMIT ${limit_bind_idx}",
-    );
-
-    let qualifying_ids = exec_condition_query(
-        &query_str,
-        &binds,
-        &broadcaster_id,
-        &member_ids,
-        user_limit,
-        pool,
-    )
-    .await?;
-
-    // Check if more users qualify than the limit allows (logging only)
-    if !qualifying_ids.is_empty() && qualifying_ids.len() == user_limit {
-        let count_query = format!(
-            "SELECT COUNT(*) FROM linked_accounts la \
-             JOIN user_channel_cache ucc ON ucc.twitch_user_id = la.twitch_user_id \
-               AND ucc.broadcaster_id = ${broadcaster_bind_idx} \
-             WHERE la.discord_id = ANY(${members_bind_idx}::text[]) \
-               AND ({where_clause})",
+    // Build the qualifying-id query. Channel-agnostic grant skips the cache
+    // join entirely; otherwise we LEFT JOIN this broadcaster's cache and push
+    // the DNF rule into SQL.
+    let qualifying_ids: Vec<String> = if tree.grant_on_any_relation {
+        sqlx::query_scalar::<_, String>(
+            "SELECT la.discord_id FROM linked_accounts la \
+             WHERE la.discord_id = ANY($1::text[]) ORDER BY la.linked_at ASC LIMIT $2",
+        )
+        .bind(&member_ids)
+        .bind(user_limit as i64)
+        .fetch_all(pool)
+        .await?
+    } else {
+        let broadcaster_id = broadcaster_id
+            .as_deref()
+            .expect("broadcaster bound for channel-scoped rule");
+        let (rule_where, binds) = rule_sql::build_rule_where(&tree, 2);
+        let limit_idx = 2 + binds.len() + 1;
+        let query = format!(
+            "SELECT la.discord_id FROM linked_accounts la \
+             LEFT JOIN user_channel_cache ucc \
+               ON ucc.twitch_user_id = la.twitch_user_id AND ucc.broadcaster_id = $1 \
+             WHERE la.discord_id = ANY($2::text[]) AND ({rule_where}) \
+             ORDER BY la.linked_at ASC LIMIT ${limit_idx}"
         );
-        let total: i64 = exec_condition_count(&count_query, &binds, &broadcaster_id, &member_ids, pool)
-            .await
-            .unwrap_or(qualifying_ids.len() as i64);
-        if total as usize > user_limit {
-            tracing::warn!(
-                guild_id, role_id, total, user_limit,
-                "Role link user limit reached: {total} users qualify but limit is {user_limit}"
-            );
+        let mut q = sqlx::query_scalar::<_, String>(&query)
+            .bind(broadcaster_id)
+            .bind(&member_ids);
+        for b in &binds {
+            q = match b {
+                Bind::Bool(v) => q.bind(*v),
+                Bind::Int(v) => q.bind(*v),
+            };
         }
+        q = q.bind(user_limit as i64);
+        q.fetch_all(pool).await?
+    };
+
+    if !qualifying_ids.is_empty() && qualifying_ids.len() == user_limit {
+        tracing::warn!(
+            guild_id, role_id, user_limit,
+            "Role link user limit reached: at least {user_limit} users qualify"
+        );
     }
 
-    // Atomic replace (uses chunked upload if > 100k)
     match rl_client
         .upload_users(guild_id, role_id, &qualifying_ids, &api_token)
         .await
@@ -437,7 +369,6 @@ pub async fn sync_for_role_link(
         Err(e) => return Err(e),
     }
 
-    // Update local assignments atomically
     let mut tx = pool.begin().await?;
     sqlx::query("DELETE FROM role_assignments WHERE guild_id = $1 AND role_id = $2")
         .bind(guild_id)
@@ -461,50 +392,35 @@ pub async fn sync_for_role_link(
     Ok(())
 }
 
-async fn exec_condition_query(
-    query: &str,
-    binds: &[ConditionBind],
-    broadcaster_id: &str,
-    member_ids: &[String],
-    limit: usize,
-    pool: &PgPool,
-) -> Result<Vec<String>, AppError> {
-    let mut q = sqlx::query_scalar::<_, String>(query);
-    for bind in binds {
-        q = match bind {
-            ConditionBind::Int(v) => q.bind(*v),
-        };
+/// Clear all assignments for a role link (RoleLogic + local mirror).
+async fn clear_role(
+    guild_id: &str,
+    role_id: &str,
+    api_token: &str,
+    state: &AppState,
+) -> Result<(), AppError> {
+    match state
+        .rl_client
+        .upload_users(guild_id, role_id, &[], api_token)
+        .await
+    {
+        Ok(_) => {}
+        Err(AppError::RoleLinkNotFound) => {
+            delete_orphan_role_link(guild_id, role_id, &state.pool).await;
+            return Ok(());
+        }
+        Err(e) => return Err(e),
     }
-    q = q.bind(broadcaster_id);
-    q = q.bind(member_ids);
-    q = q.bind(limit as i64);
-
-    Ok(q.fetch_all(pool).await?)
-}
-
-async fn exec_condition_count(
-    query: &str,
-    binds: &[ConditionBind],
-    broadcaster_id: &str,
-    member_ids: &[String],
-    pool: &PgPool,
-) -> Result<i64, AppError> {
-    let mut q = sqlx::query_scalar::<_, i64>(query);
-    for bind in binds {
-        q = match bind {
-            ConditionBind::Int(v) => q.bind(*v),
-        };
-    }
-    q = q.bind(broadcaster_id);
-    q = q.bind(member_ids);
-    Ok(q.fetch_one(pool).await?)
+    sqlx::query("DELETE FROM role_assignments WHERE guild_id = $1 AND role_id = $2")
+        .bind(guild_id)
+        .bind(role_id)
+        .execute(&state.pool)
+        .await?;
+    Ok(())
 }
 
 /// Remove a user from all role assignments (after account unlink).
-pub async fn remove_all_assignments(
-    discord_id: &str,
-    state: &AppState,
-) -> Result<(), AppError> {
+pub async fn remove_all_assignments(discord_id: &str, state: &AppState) -> Result<(), AppError> {
     let pool = &state.pool;
     let rl_client = &state.rl_client;
 
@@ -545,9 +461,7 @@ pub async fn remove_all_assignments(
 }
 
 /// Delete a role_link the RoleLogic API reports as gone (403 Invalid or
-/// revoked token). CASCADE clears role_assignments. Best-effort: logs DB
-/// failures, never propagates them — sync workers must not stop syncing
-/// other links over a cleanup hiccup.
+/// revoked token). CASCADE clears role_assignments. Best-effort.
 async fn delete_orphan_role_link(guild_id: &str, role_id: &str, pool: &PgPool) {
     tracing::warn!(
         guild_id,

@@ -11,6 +11,8 @@ use crate::error::AppError;
 use crate::services::sync::{self, ConfigSyncEvent};
 use crate::AppState;
 
+const OAUTH_DONE_TEMPLATE: &str = include_str!("../../templates/oauth_done.html");
+
 #[derive(Deserialize)]
 pub struct ConnectQuery {
     pub guild_id: String,
@@ -175,36 +177,63 @@ pub async fn connect_callback(
             .await;
     });
 
-    // Return success page
-    let html = format!(
-        r##"<!DOCTYPE html>
-<html>
-<head>
-    <meta charset="utf-8">
-    <title>Twitch Follower Role - Connected</title>
-    <link rel="icon" href="{base_url}/favicon.ico" type="image/x-icon">
-    <meta name="theme-color" content="#9146ff">
-    <style>
-        body {{ font-family: system-ui, sans-serif; max-width: 480px; margin: 60px auto; padding: 20px; background: #0e0e10; color: #c8ccd4; text-align: center; }}
-        h1 {{ color: #9146ff; }}
-        .card {{ background: #18181b; padding: 24px; border-radius: 10px; margin-top: 20px; border: 1px solid #2a2a2e; }}
-        .success {{ color: #4ade80; }}
-    </style>
-</head>
-<body>
-    <h1>Twitch Follower Role</h1>
-    <div class="card">
-        <p class="success" style="font-size: 18px; font-weight: 600;">Channel connected!</p>
-        <p style="margin-top: 12px;">Connected as <strong>{login}</strong></p>
-        <p style="margin-top: 8px; color: #7a8299; font-size: 13px;">You can close this page and return to the RoleLogic dashboard to configure conditions.</p>
-    </div>
-</body>
-</html>"##,
-        base_url = state.config.base_url,
-        login = broadcaster.login
-    );
+    // Return success page (opened in a new tab from the iframe — it tries to
+    // auto-close; the iframe re-fetches its data on focus and shows the new
+    // channel on its own).
+    let login_safe = broadcaster
+        .login
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;");
+    let html = OAUTH_DONE_TEMPLATE
+        .replace("{{BASE_URL}}", &state.config.base_url)
+        .replace("{{TWITCH_LOGIN}}", &login_safe)
+        .replace("{{GUILD_ID}}", &guild_id);
 
     Ok((StatusCode::OK, [("content-type", "text/html; charset=utf-8")], html).into_response())
+}
+
+/// Best-effort cleanup of a broadcaster's EventSub subscriptions and cached
+/// rows once no role link references it anymore. Shared by `delete_config`
+/// (role link removed) and the iframe disconnect action. Never propagates DB
+/// errors — cleanup hiccups must not block the caller's main action.
+pub(crate) async fn cleanup_broadcaster_if_orphaned(state: &AppState, broadcaster_id: &str) {
+    let still_referenced = sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS(SELECT 1 FROM role_links WHERE broadcaster_id = $1)",
+    )
+    .bind(broadcaster_id)
+    .fetch_one(&state.pool)
+    .await
+    .unwrap_or(true);
+
+    if still_referenced {
+        return;
+    }
+
+    let subs = sqlx::query_as::<_, (String,)>(
+        "DELETE FROM eventsub_subscriptions WHERE broadcaster_id = $1 RETURNING id",
+    )
+    .bind(broadcaster_id)
+    .fetch_all(&state.pool)
+    .await
+    .unwrap_or_default();
+
+    if !subs.is_empty() {
+        if let Ok(app_token) = state.twitch_client.get_app_access_token().await {
+            for (sub_id,) in subs {
+                let _ = state
+                    .twitch_client
+                    .delete_eventsub_subscription(&sub_id, &app_token)
+                    .await;
+            }
+        }
+    }
+
+    sqlx::query("DELETE FROM user_channel_cache WHERE broadcaster_id = $1")
+        .bind(broadcaster_id)
+        .execute(&state.pool)
+        .await
+        .ok();
 }
 
 /// Create EventSub webhook subscriptions for a broadcaster.

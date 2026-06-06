@@ -1,5 +1,7 @@
 use std::sync::Arc;
 
+use axum::http::{header, HeaderValue, Method};
+use axum::middleware;
 use axum::routing::{delete, get, post};
 use axum::Router;
 use sqlx::PgPool;
@@ -17,6 +19,7 @@ mod services;
 mod tasks;
 
 use services::rolelogic::RoleLogicClient;
+use services::security_headers;
 use services::sync::{ConfigSyncEvent, UserSyncEvent};
 use services::twitch::TwitchClient;
 
@@ -82,6 +85,22 @@ async fn main() {
     tokio::spawn(tasks::config_sync_worker::run(config_sync_rx, Arc::clone(&state)));
     tokio::spawn(tasks::cleanup_expired(Arc::clone(&state)));
 
+    // CORS: explicit allowlist (this plugin's origin + the RoleLogic dashboard
+    // that embeds the iframe). `allow_credentials(true)` requires explicit
+    // origins (no wildcard), which is why we don't use `permissive()`.
+    let cors_origins: Vec<HeaderValue> = state
+        .config
+        .allowed_origins
+        .iter()
+        .filter_map(|o| HeaderValue::from_str(o).ok())
+        .collect();
+    let cors_layer = CorsLayer::new()
+        .allow_origin(cors_origins)
+        .allow_methods([Method::GET, Method::POST, Method::DELETE, Method::OPTIONS])
+        .allow_headers([header::CONTENT_TYPE, header::AUTHORIZATION])
+        .allow_credentials(true)
+        .max_age(std::time::Duration::from_secs(600));
+
     let app = Router::new()
         .nest("/twitch-follower-role", Router::new()
             // Plugin endpoints (called by RoleLogic)
@@ -89,6 +108,16 @@ async fn main() {
             .route("/config", get(routes::plugin::get_config))
             .route("/config", post(routes::plugin::post_config))
             .route("/config", delete(routes::plugin::delete_config))
+            // Admin — iframe role-config (deep-linked from the RoleLogic dashboard)
+            .route("/admin/{guild_id}/role/{role_id}", get(routes::admin::role_config_page))
+            .route("/admin/{guild_id}/role/{role_id}/data", get(routes::admin::role_config_data))
+            .route("/admin/{guild_id}/role/{role_id}/save", post(routes::admin::role_config_save))
+            .route(
+                "/admin/{guild_id}/role/{role_id}/preview",
+                get(routes::admin::role_config_preview).post(routes::admin::role_config_preview_edit),
+            )
+            .route("/admin/{guild_id}/role/{role_id}/connect", post(routes::admin::broadcaster_connect))
+            .route("/admin/{guild_id}/role/{role_id}/disconnect", post(routes::admin::broadcaster_disconnect))
             // Verification endpoints (user-facing)
             .route("/verify", get(routes::verification::verify_page))
             .route("/verify/login", get(routes::verification::login))
@@ -108,7 +137,8 @@ async fn main() {
             .route("/health", get(routes::health::health))
         )
         .layer(TraceLayer::new_for_http())
-        .layer(CorsLayer::permissive())
+        .layer(cors_layer)
+        .layer(middleware::from_fn(security_headers::baseline))
         .with_state(state);
 
     tracing::info!("Server starting on {listen_addr}");

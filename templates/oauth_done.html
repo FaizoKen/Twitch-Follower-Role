@@ -1,0 +1,97 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Connected! — Twitch Follower Role</title>
+  <link rel="icon" href="{{BASE_URL}}/favicon.ico">
+  <style>
+    :root {
+      --bg: #0e0e10;
+      --card: #18181b;
+      --border: #2a2a2e;
+      --text: #e8eaed;
+      --muted: #9aa3b2;
+      --accent: #9146ff; /* Twitch purple */
+      --accent-hover: #772ce8;
+      --success: #4ade80;
+      --danger: #f87171;
+    }
+    * { box-sizing: border-box; }
+    body {
+      font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+      background: var(--bg); color: var(--text);
+      margin: 0; padding: 48px 24px; min-height: 100vh;
+      display: flex; align-items: center; justify-content: center;
+    }
+    .card {
+      background: var(--card); border: 1px solid var(--border);
+      border-radius: 14px; padding: 32px 28px; max-width: 460px; width: 100%;
+      text-align: center;
+    }
+    .badge {
+      display: inline-flex; align-items: center; justify-content: center;
+      width: 56px; height: 56px; border-radius: 14px;
+      background: rgba(145, 70, 255, .16); color: var(--success);
+      font-size: 30px; margin-bottom: 14px;
+    }
+    h1 { margin: 0 0 8px; font-size: 22px; font-weight: 700; overflow-wrap: anywhere; }
+    p { margin: 8px 0; color: var(--muted); line-height: 1.55; overflow-wrap: anywhere; }
+    .name {
+      color: var(--text); font-weight: 600;
+      background: rgba(145, 70, 255, 0.14);
+      padding: 2px 8px; border-radius: 6px;
+    }
+    code {
+      background: #0b0d12; padding: 2px 6px; border-radius: 4px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 12px; word-break: break-all; color: var(--text);
+    }
+    button { font-family: inherit; font-size: 14px; font-weight: 600; cursor: pointer; }
+    button.primary {
+      display: inline-block; margin-top: 20px;
+      background: var(--accent); color: #fff; border: 0;
+      padding: 11px 22px; border-radius: 8px;
+      transition: background 0.15s;
+    }
+    button.primary:hover { background: var(--accent-hover); }
+    .small { margin-top: 16px; color: #6a7385; font-size: 12px; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <div class="badge">&#10003;</div>
+    <h1>Twitch channel connected</h1>
+    <p>
+      <span class="name">{{TWITCH_LOGIN}}</span>
+      is now linked to this role's Twitch-Follower-Role config.
+    </p>
+    <p>Return to the RoleLogic dashboard tab for guild <code>{{GUILD_ID}}</code> — it refreshes itself and will show the connected channel.</p>
+    <button id="close-btn" class="primary">Close this tab</button>
+    <p id="close-hint" class="small" style="display:none">
+      Your browser blocked auto-close. You can close this tab manually.
+    </p>
+  </div>
+<script>
+// Usually opened via `window.open(..., 'noopener')` from the admin iframe —
+// `noopener` severs the opener reference, which means most browsers ALSO
+// refuse a programmatic `window.close()`. Try anyway; on failure swap the
+// button to a hint. The opener page polls on visibility/focus and picks up
+// the new broadcaster on its own.
+(function wireClose(){
+  const btn = document.getElementById('close-btn');
+  const hint = document.getElementById('close-hint');
+  if (!btn) return;
+  btn.addEventListener('click', () => {
+    window.close();
+    setTimeout(() => {
+      if (!window.closed) {
+        btn.style.display = 'none';
+        if (hint) hint.style.display = 'block';
+      }
+    }, 150);
+  });
+})();
+</script>
+</body>
+</html>

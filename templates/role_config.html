@@ -1,0 +1,482 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Twitch Follower Role</title>
+<link rel="icon" href="__BASE_URL__/favicon.ico">
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body { margin:0; background:#0e0e10; color:#e8eaed;
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Arial,sans-serif;
+    font-size:14px; line-height:1.5; padding:24px; }
+  h1 { font-size:18px; margin:0 0 4px; }
+  .sub { color:#8a93a4; font-size:13px; margin:0 0 22px; }
+  .q { font-weight:700; font-size:14px; margin:0 0 9px; }
+  .opts { display:grid; grid-template-columns:repeat(auto-fit,minmax(215px,1fr));
+    gap:7px; margin-bottom:10px; }
+  .opt { display:flex; gap:8px; align-items:flex-start;
+    border:1px solid #2a2a2e; border-radius:8px; padding:8px 10px;
+    cursor:pointer; background:#18181b; transition:border-color .1s; }
+  .opt:hover { border-color:#3a3a40; }
+  .opt.sel { border-color:#9146ff; background:#1b1230; }
+  .opt input { margin:1px 0 0; accent-color:#9146ff; flex:none; }
+  .opt .t { font-weight:600; font-size:12.5px; line-height:1.25; }
+  .opt .d { color:#8a93a4; font-size:11px; line-height:1.3; margin-top:1px; }
+  .extra { margin:0 0 6px; }
+  .inline { color:#cfd6e4; font-size:13px; padding:9px 11px;
+    border:1px solid #2a2a2e; border-radius:8px; background:#18181b; }
+  .inline input, .inline select { background:#0b0d12; color:#e8eaed;
+    border:1px solid #2a2f3a; border-radius:6px; padding:5px 7px; font-size:13px; }
+  .inline input { width:70px; }
+  .blk { margin:22px 0; }
+  .blk label { display:block; font-weight:700; margin:0 0 8px; }
+  select, input[type=text], input[type=number] { background:#0b0d12; color:#e8eaed;
+    border:1px solid #2a2f3a; border-radius:6px; padding:8px 10px; font-size:13px; }
+  select:focus, input:focus { outline:1px solid #9146ff; }
+  .row { display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+  button { background:#26262c; color:#e8eaed; border:0; border-radius:7px;
+    padding:8px 13px; font-size:13px; font-weight:600; cursor:pointer; }
+  button:hover { background:#313139; }
+  button.primary { background:#9146ff; color:#fff; padding:11px 22px; font-size:14px; }
+  button.primary:hover { background:#772ce8; }
+  button:disabled { opacity:.5; cursor:not-allowed; }
+  button:disabled:hover { background:#26262c; }
+  button.primary:disabled:hover { background:#9146ff; }
+  button.x { background:none; color:#8a93a4; padding:4px 6px; }
+  button.x:hover { color:#fca5a5; }
+  button.danger { background:none; color:#f87171; border:1px solid #7f1d1d; }
+  button.danger:hover { background:#7f1d1d33; }
+  .connectcta { border:1px dashed #3a3a40; border-radius:10px; padding:18px;
+    text-align:center; background:#161619; }
+  .connectcta p { color:#9aa3b2; margin:4px 0 14px; font-size:13px; }
+  .share { background:#1a1726; border:1px solid #34294a; border-radius:10px;
+    padding:13px 15px; margin:22px 0; font-size:13px; color:#c3b8d8; }
+  .share b { color:#e9deff; }
+  .copybox { display:flex; gap:8px; margin-top:9px; align-items:stretch; }
+  .copybox code { flex:1; min-width:0; background:#0b0d12; border:1px solid #34294a; border-radius:6px;
+    padding:8px 10px; font-size:12px; overflow:auto; white-space:nowrap; }
+  .copybox .btn-open { background:#26262c; color:#e8eaed; border:0; border-radius:7px;
+    padding:8px 13px; font-size:13px; font-weight:600; cursor:pointer;
+    text-decoration:none; display:inline-flex; align-items:center;
+    white-space:nowrap; flex:0 0 auto; }
+  .copybox .btn-open:hover { background:#313139; }
+  .adv { margin:6px 0 0; }
+  .grp { border:1px solid #2a2f3a; border-radius:9px; padding:11px;
+    margin:8px 0; background:#161619; }
+  .grp-h { display:flex; justify-content:space-between; color:#8a93a4;
+    font-size:12px; margin-bottom:6px; }
+  .or { text-align:center; color:#7a8497; font-weight:700; font-size:11px;
+    letter-spacing:.08em; margin:4px 0; }
+  .cond { display:flex; gap:7px; align-items:center; flex-wrap:wrap;
+    padding:6px 0; border-bottom:1px solid #232328; }
+  .cond:last-of-type { border-bottom:0; }
+  .hint { color:#7a8497; font-size:11px; flex-basis:100%; margin-left:2px; }
+  .foot { display:flex; justify-content:space-between; align-items:center;
+    gap:14px; flex-wrap:wrap; margin-top:26px; padding-top:16px;
+    border-top:1px solid #232328; }
+  .foot-btns { display:flex; gap:10px; align-items:center; margin-left:auto; }
+  .count { color:#8a93a4; font-size:12.5px; }
+  .count .ok { color:#9146ff; font-weight:600; }
+  .toast { padding:10px 12px; border-radius:8px; font-size:13px; margin-top:12px; }
+  .toast.e { background:#2a1518; border:1px solid #5c2630; color:#f6b8c0; }
+  .hidden { display:none !important; }
+  @media (max-width: 560px) {
+    body { padding:16px 14px; font-size:14px; }
+    h1 { font-size:17px; }
+    .sub { margin-bottom:18px; }
+    .opts { grid-template-columns:1fr; gap:6px; }
+    .opt { padding:9px 11px; }
+    .inline { font-size:13px; padding:9px 11px; }
+    .blk { margin:18px 0; }
+    select, input[type=text], input[type=number] { font-size:14px; padding:9px 10px; }
+    select { max-width:100%; width:100%; }
+    .row > button { flex:1 1 auto; }
+    .copybox { flex-wrap:wrap; gap:8px; }
+    .copybox code { flex:1 1 100%; white-space:normal; word-break:break-all; font-size:12px; }
+    .copybox .btn-open, .copybox button { flex:1 1 0; justify-content:center; }
+    .share { padding:12px 13px; }
+    .grp { padding:10px; }
+    .cond { gap:6px; padding:8px 0; }
+    .cond > select, .cond > .vw { flex:1 1 100%; min-width:0; }
+    .cond > .vw { display:flex; gap:6px; flex-wrap:wrap; }
+    .cond > .vw > input { flex:1 1 0; min-width:0; }
+    .cond [data-del] { margin-left:auto; }
+    .foot { gap:10px; }
+    .count { flex:1 1 100%; order:1; }
+    .foot-btns { order:2; width:100%; margin-left:0; }
+    .foot-btns > button { flex:1 1 0; }
+    button.primary { padding:11px 16px; }
+  }
+</style>
+</head>
+<body>
+<div id="app"><p class="sub">Loading…</p></div>
+
+<script>
+const BASE_URL="__BASE_URL__", GUILD_ID="__GUILD_ID__", ROLE_ID="__ROLE_ID__";
+const IFRAME_TOKEN="__IFRAME_TOKEN__", IS_EMBEDDED=!!IFRAME_TOKEN;
+
+function postToHost(m){ if(!IS_EMBEDDED) return; try{ parent.postMessage(m,'*'); }catch(_){} }
+function postHeight(){ postToHost({type:'rl:resize',height:Math.max(
+  document.documentElement.scrollHeight,document.body.scrollHeight)}); }
+const postDirty=d=>postToHost({type:'rl:dirty',dirty:!!d});
+const postSaved=()=>postToHost({type:'rl:saved'});
+const postToast=(m,k)=>postToHost({type:'rl:toast',message:String(m||''),kind:k||'error'});
+if(IS_EMBEDDED&&'ResizeObserver'in window) new ResizeObserver(postHeight).observe(document.body);
+window.addEventListener('load',postHeight);
+
+function apiHeaders(x){ const h=Object.assign({'Content-Type':'application/json'},x||{});
+  if(IFRAME_TOKEN) h['Authorization']='Bearer '+IFRAME_TOKEN; return h; }
+function apiCreds(){ return IS_EMBEDDED?'omit':'include'; }
+function esc(s){ return String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+
+// Clipboard write that works in iframes without `allow="clipboard-write"`.
+function copyText(text){
+  const fallback=()=>{ try{
+    const ta=document.createElement('textarea'); ta.value=text;
+    ta.setAttribute('readonly',''); ta.style.position='fixed';
+    ta.style.top='0'; ta.style.left='0'; ta.style.opacity='0';
+    document.body.appendChild(ta); ta.select(); ta.setSelectionRange(0,text.length);
+    const ok=document.execCommand('copy'); document.body.removeChild(ta); return ok;
+  }catch(_){ return false; } };
+  if(navigator.clipboard&&navigator.clipboard.writeText){
+    return navigator.clipboard.writeText(text).then(()=>true,()=>fallback());
+  }
+  return Promise.resolve(fallback());
+}
+function wireCopy(btnId,text){ const b=document.getElementById(btnId); if(!b) return;
+  b.addEventListener('click',()=>{ copyText(text).then(ok=>{
+    b.textContent=ok?'Copied ✓':'Press Ctrl+C';
+    setTimeout(()=>b.textContent='Copy link',1500); }); }); }
+
+let state=null, dirty=false, refreshInFlight=false;
+function setDirty(d){ dirty=d; postDirty(d);
+  const s=document.getElementById('save'); if(s) s.disabled=!d; }
+function ruleKey(c){ return JSON.stringify({
+  g:!!c.grant_on_any_relation,
+  // grant_on_any makes groups irrelevant — normalise so a stale groups list
+  // doesn't count as dirty.
+  r:c.grant_on_any_relation?[]:(c.groups||[]),
+}); }
+function recomputeDirty(){
+  if(!state||!state._edit||!state.config) return;
+  setDirty(ruleKey(state._edit)!==ruleKey(state.config));
+}
+
+const HELP={ is_follower:"Currently follows the channel.",
+  follow_age_days:"Whole days since they first followed.",
+  is_subscriber:"Has an active paid sub right now.",
+  sub_tier:"Subscription tier: 1, 2, or 3." };
+
+function c(t,o,v){ return {target:t,operator:o,value:v,value_end:null}; }
+function needsChannel(id){ return id!=='anyone' && id!=='anyone_unset'; }
+
+function presets(){ return [
+ {id:"anyone", t:"Anyone who linked their Twitch", d:"Simplest. No channel needed.",
+  make:()=>({grant:true,groups:[]})},
+ {id:"followers", t:"People who follow my channel", d:"Anyone following on Twitch.",
+  make:()=>({grant:false,groups:[[c('is_follower','eq',true)]]})},
+ {id:"loyal_follower", t:"Long-time followers", d:"Followed for at least N days.", n:30,
+  make:n=>({grant:false,groups:[[c('is_follower','eq',true),c('follow_age_days','gte',n||30)]]})},
+ {id:"subscribers", t:"My subscribers", d:"Anyone with an active sub.",
+  make:()=>({grant:false,groups:[[c('is_subscriber','eq',true)]]})},
+ {id:"sub_tier", t:"Higher-tier subscribers", d:"Subscribed at Tier 2 or Tier 3.", tier:2,
+  make:tr=>({grant:false,groups:[[c('is_subscriber','eq',true),c('sub_tier','gte',tr||2)]]})},
+ {id:"custom", t:"Advanced rule", d:"Combine several conditions with AND / OR.", make:null},
+];}
+
+async function load(){
+  try{
+    const r=await fetch(`${BASE_URL}/admin/${GUILD_ID}/role/${ROLE_ID}/data`,
+      {headers:apiHeaders(),credentials:apiCreds(),cache:'no-store'});
+    if(!r.ok){ const e=await r.json().catch(()=>({error:r.status}));
+      document.getElementById('app').innerHTML=`<div class="toast e">${esc(e.error||('HTTP '+r.status))}</div>`;
+      postHeight(); return; }
+    state=await r.json();
+    state._edit=JSON.parse(JSON.stringify(state.config));
+    state._preset=detectPreset(state._edit);
+    state._n=guessN(state._edit);
+    state._t=guessTier(state._edit);
+    // Fresh role: groups [] + grant false is the "unconfigured → nobody"
+    // sentinel. We show "Anyone who linked their Twitch" preselected; align the
+    // edit buffer to that so a single Save applies the sensible default instead
+    // of re-persisting the grant-to-nobody sentinel.
+    if(state._preset==='anyone_unset'){
+      state._edit.grant_on_any_relation=true;
+      state._edit.groups=[];
+      state._preset='anyone';
+      recomputeDirty();
+    }
+    render(); autoPreview();
+  }catch(e){ document.getElementById('app').innerHTML=
+    `<div class="toast e">Network error: ${esc(String(e))}</div>`; }
+}
+function detectPreset(cfg){
+  if(cfg.grant_on_any_relation) return 'anyone';
+  const g=cfg.groups||[];
+  if(g.length===0) return 'anyone_unset';
+  if(g.length===1){ const cs=g[0].conditions||[];
+    const only=t=>cs.length===1&&cs[0].target===t&&cs[0].operator==='eq'&&cs[0].value===true;
+    if(only('is_follower'))return'followers'; if(only('is_subscriber'))return'subscribers';
+    if(cs.length===2&&cs[0].target==='is_follower'&&cs[1].target==='follow_age_days'&&cs[1].operator==='gte')return'loyal_follower';
+    if(cs.length===2&&cs[0].target==='is_subscriber'&&cs[1].target==='sub_tier'&&cs[1].operator==='gte')return'sub_tier'; }
+  return 'custom';
+}
+function guessN(cfg){ try{ return Number(cfg.groups[0].conditions.find(x=>x.target==='follow_age_days').value)||30; }catch(_){ return 30; } }
+function guessTier(cfg){ try{ return Number(cfg.groups[0].conditions.find(x=>x.target==='sub_tier').value)||2; }catch(_){ return 2; } }
+function targetByKey(k){ return state.targets.find(t=>t.key===k); }
+function opByKey(k){ return state.operators.find(o=>o.key===k); }
+function opsForKind(k){ return state.operators.filter(o=>o.valid_for[k]); }
+
+function render(){
+  const cfg=state._edit, app=document.getElementById('app');
+  const cur=state._preset, showChan=needsChannel(cur);
+  const ch=state.channel||{connected:false};
+  const verifyUrl=state.verify_url||(BASE_URL+"/verify");
+
+  const opts=presets().map(p=>{
+    const on=(cur===p.id)||(p.id==='anyone'&&cur==='anyone_unset');
+    return `<label class="opt ${on?'sel':''}">
+      <input type="radio" name="who" value="${p.id}" ${on?'checked':''}>
+      <div><div class="t">${esc(p.t)}</div><div class="d">${esc(p.d)}</div></div></label>`;
+  }).join('');
+
+  let extra='';
+  if(cur==='loyal_follower') extra=`<div class="extra"><div class="inline">Followed for at least
+    <input type="number" id="loyaln" min="0" value="${state._n}"> days</div></div>`;
+  else if(cur==='sub_tier') extra=`<div class="extra"><div class="inline">Subscribed at
+    <select id="tiersel"><option value="2" ${state._t==2?'selected':''}>Tier 2 or higher</option>
+    <option value="3" ${state._t==3?'selected':''}>Tier 3 only</option></select></div></div>`;
+  else if(cur==='custom') extra=`<div class="extra"><div class="adv" id="rule"></div></div>`;
+
+  let chanBlk='';
+  if(showChan){
+    chanBlk = !ch.connected ? `
+      <div class="blk"><label>Your Twitch channel</label>
+        <div class="connectcta">
+          <p>Connect the channel we should check follows / subs against.
+             You sign in once on Twitch and come back here.</p>
+          <button class="primary" id="connect">Connect Twitch channel</button>
+        </div></div>` : `
+      <div class="blk"><label>Your Twitch channel</label>
+        <div class="row">
+          <div class="inline" style="flex:1; min-width:0">
+            Connected: <b>${esc(ch.broadcaster_login||'')}</b>
+          </div>
+          <button id="connect">Connect a different channel</button>
+          <button id="disconnect" class="danger">Disconnect</button>
+        </div></div>`;
+  }
+
+  app.innerHTML=`
+    <h1>Twitch Follower Role</h1>
+    <p class="sub">Give this Discord role to people automatically, based on their Twitch account.</p>
+    <div class="q">Who should get this role?</div>
+    <div class="opts">${opts}</div>
+    ${extra}
+    ${chanBlk}
+    <div class="share"><b>One thing your members must do:</b> they have to link their
+      Twitch account once, here — until they do, they won't get the role even if they qualify.
+      <div class="copybox"><code id="vurl">${esc(verifyUrl)}</code>
+        <a class="btn-open" href="${esc(verifyUrl)}" target="_blank" rel="noopener noreferrer">Open</a>
+        <button id="copy">Copy link</button></div>
+    </div>
+    <div class="foot">
+      <span class="count" id="count"></span>
+      <div class="foot-btns">
+        <button id="preview">Preview</button>
+        <button id="save" class="primary" ${dirty?'':'disabled'}>Save</button>
+      </div>
+    </div>`;
+
+  app.querySelectorAll('input[name=who]').forEach(r=>r.addEventListener('change',()=>choose(r.value)));
+  const cc=document.getElementById('connect'); if(cc) cc.addEventListener('click',connectChannel);
+  const dc=document.getElementById('disconnect'); if(dc) dc.addEventListener('click',disconnectChannel);
+  wireCopy('copy', verifyUrl);
+  const ln=document.getElementById('loyaln'); if(ln) ln.addEventListener('input',e=>{
+    state._n=Math.max(0,Number(e.target.value)||0); applyPreset('loyal_follower',true); });
+  const ts=document.getElementById('tiersel'); if(ts) ts.addEventListener('change',e=>{
+    state._t=Number(e.target.value)||2; applyPreset('sub_tier',true); });
+  document.getElementById('save').addEventListener('click',doSave);
+  document.getElementById('preview').addEventListener('click',doPreviewEdit);
+  if(cur==='custom') renderRule();
+  postHeight();
+}
+
+function choose(id){ state._preset=id; applyPreset(id); render(); }
+function applyPreset(id,keepRender){
+  const p=presets().find(x=>x.id===id);
+  if(id==='custom'){
+    state._edit.grant_on_any_relation=false;
+    if(!state._edit.groups||state._edit.groups.length===0)
+      state._edit.groups=[{conditions:[c(state.targets[0].key,'eq',true)]}];
+  } else if(p&&p.make){
+    const r=p.make(id==='sub_tier'?state._t:state._n);
+    state._edit.grant_on_any_relation=r.grant;
+    state._edit.groups=r.groups.map(cs=>({conditions:cs}));
+  }
+  recomputeDirty();
+  if(keepRender){ /* caller keeps current DOM (typing in the extra input) */ }
+}
+
+/* ---- advanced builder (only under "Advanced rule") ---- */
+function renderRule(){
+  const box=document.getElementById('rule'); if(!box) return;
+  const cfg=state._edit;
+  if(!cfg.groups||cfg.groups.length===0) cfg.groups=[{conditions:[c(state.targets[0].key,'eq',true)]}];
+  box.innerHTML=`<p class="hint" style="margin:8px 0">Matches if a member satisfies <b>any</b> group.
+    Within a group, <b>all</b> conditions must be true.</p>`+
+    cfg.groups.map((g,gi)=>`
+    ${gi>0?'<div class="or">— OR —</div>':''}
+    <div class="grp" data-g="${gi}">
+      <div class="grp-h"><span>Group ${gi+1} — all true</span>
+        <button class="x" data-dg="${gi}">remove</button></div>
+      ${g.conditions.map((cc,ci)=>condRow(cc,gi,ci)).join('')}
+      <button data-ac="${gi}" style="margin-top:6px">+ condition</button>
+    </div>`).join('')+`<button id="ag" style="margin-top:8px">+ OR group</button>`;
+  box.querySelectorAll('[data-dg]').forEach(b=>b.onclick=()=>{ cfg.groups.splice(+b.dataset.dg,1); recomputeDirty(); renderRule(); postHeight(); });
+  box.querySelectorAll('[data-ac]').forEach(b=>b.onclick=()=>{
+    if(cfg.groups[+b.dataset.ac].conditions.length>=state.limits.max_conditions_per_group){ postToast(`Max ${state.limits.max_conditions_per_group} conditions per group.`); return; }
+    cfg.groups[+b.dataset.ac].conditions.push(c(state.targets[0].key,'eq',true)); recomputeDirty(); renderRule(); postHeight(); });
+  const ag=document.getElementById('ag'); if(ag) ag.onclick=()=>{
+    if(cfg.groups.length>=state.limits.max_groups){ postToast(`Max ${state.limits.max_groups} groups.`); return; }
+    cfg.groups.push({conditions:[c(state.targets[0].key,'eq',true)]}); recomputeDirty(); renderRule(); postHeight(); };
+  box.querySelectorAll('[data-cond]').forEach(wireCond);
+}
+function condRow(cc,gi,ci){
+  const tgt=targetByKey(cc.target)||state.targets[0];
+  const tsel=state.targets.map(t=>`<option value="${t.key}" ${t.key===cc.target?'selected':''}>${esc(t.label)}</option>`).join('');
+  let mid;
+  if(tgt.kind==='bool'){ const m=cc.value===true||cc.value==='true';
+    mid=`<select class="bv"><option value="1" ${m?'selected':''}>must be true</option><option value="0" ${!m?'selected':''}>must be false</option></select>`;
+  } else { const ops=opsForKind(tgt.kind);
+    mid=`<select class="o">${ops.map(o=>`<option value="${o.key}" ${o.key===cc.operator?'selected':''}>${esc(o.label)}</option>`).join('')}</select><span class="vw">${valWidget(tgt,cc)}</span>`; }
+  return `<div class="cond" data-cond data-g="${gi}" data-c="${ci}"><select class="t">${tsel}</select>${mid}
+    <button class="x" data-del>×</button><div class="hint">${esc(HELP[cc.target]||'')}</div></div>`;
+}
+function valWidget(tgt,cc){ const op=opByKey(cc.operator)||{};
+  if(op.needs_value_end) return `<input type="number" class="v" placeholder="min" value="${cc.value??''}"> and <input type="number" class="ve" placeholder="max" value="${cc.value_end??''}">`;
+  return `<input type="number" class="v" value="${cc.value??''}">`; }
+function wireCond(row){
+  const gi=+row.dataset.g, ci=+row.dataset.c, cfg=state._edit, cc=cfg.groups[gi].conditions[ci];
+  row.querySelector('.t').onchange=e=>{ cc.target=e.target.value; const t=targetByKey(cc.target);
+    if(t.kind==='bool'){ cc.operator='eq'; cc.value=true; } else { const v=opsForKind(t.kind);
+      if(!v.find(x=>x.key===cc.operator)) cc.operator=v[0].key; cc.value=''; }
+    cc.value_end=null; recomputeDirty(); renderRule(); postHeight(); };
+  const bv=row.querySelector('.bv'); if(bv) bv.onchange=e=>{ cc.operator='eq'; cc.value=e.target.value==='1'; recomputeDirty(); };
+  const o=row.querySelector('.o'); if(o) o.onchange=e=>{ cc.operator=e.target.value; cc.value_end=null; recomputeDirty(); renderRule(); postHeight(); };
+  row.querySelectorAll('.v,.ve').forEach(inp=>inp.oninput=()=>{
+    if(inp.classList.contains('ve')) cc.value_end=inp.value===''?null:Number(inp.value);
+    else cc.value=inp.value===''?'':Number(inp.value); recomputeDirty(); });
+  row.querySelector('[data-del]').onclick=()=>{ cfg.groups[gi].conditions.splice(ci,1);
+    if(cfg.groups[gi].conditions.length===0) cfg.groups.splice(gi,1);
+    if(cfg.groups.length===0) cfg.groups=[{conditions:[c(state.targets[0].key,'eq',true)]}];
+    recomputeDirty(); renderRule(); postHeight(); };
+}
+
+async function connectChannel(){
+  try{
+    const r=await fetch(`${BASE_URL}/admin/${GUILD_ID}/role/${ROLE_ID}/connect`,
+      {method:'POST',headers:apiHeaders(),credentials:apiCreds()});
+    const d=await r.json();
+    if(!r.ok){ postToast(d.error||'Could not start Twitch connect.'); return; }
+    window.open(d.authorize_url,'_blank','noopener');
+    postToast('Twitch opened in a new tab. Approve it, then return here — this page refreshes itself.','success');
+  }catch(e){ postToast('Connect error: '+e); }
+}
+async function disconnectChannel(){
+  if(!confirm('Disconnect this Twitch channel? Members lose this role until a channel is reconnected.')) return;
+  try{
+    const r=await fetch(`${BASE_URL}/admin/${GUILD_ID}/role/${ROLE_ID}/disconnect`,
+      {method:'POST',headers:apiHeaders(),credentials:apiCreds()});
+    const d=await r.json().catch(()=>({}));
+    if(!r.ok){ postToast(d.error||'Could not disconnect.'); return; }
+    state.channel={connected:false,broadcaster_id:null,broadcaster_login:null};
+    render(); autoPreview();
+    postToast('Channel disconnected.','success');
+  }catch(e){ postToast('Network error: '+e); }
+}
+
+async function doPreview(){
+  const el=document.getElementById('count'); if(!el) return;
+  try{
+    const r=await fetch(`${BASE_URL}/admin/${GUILD_ID}/role/${ROLE_ID}/preview`,
+      {headers:apiHeaders(),credentials:apiCreds(),cache:'no-store'});
+    const d=await r.json();
+    if(!r.ok||d.available===false){ el.textContent=''; return; }
+    el.innerHTML=`<span class="ok">${d.matching}</span> of ${d.linked} linked member(s) match`
+      +(dirty?` · <span style="color:#fbbf24">Save to apply</span>`:``);
+  }catch(_){ el.textContent=''; }
+  postHeight();
+}
+function autoPreview(){ doPreview(); }
+async function doPreviewEdit(){
+  const el=document.getElementById('count'); const btn=document.getElementById('preview');
+  if(!btn) return;
+  const cfg=state._edit;
+  const payload={ grant_on_any_relation:cfg.grant_on_any_relation,
+    groups: cfg.grant_on_any_relation?[]:(cfg.groups||[]) };
+  btn.disabled=true; const orig=btn.textContent; btn.textContent='Previewing…';
+  try{
+    const r=await fetch(`${BASE_URL}/admin/${GUILD_ID}/role/${ROLE_ID}/preview`,
+      {method:'POST',headers:apiHeaders(),credentials:apiCreds(),body:JSON.stringify(payload)});
+    const d=await r.json().catch(()=>({}));
+    if(!r.ok){ postToast(d.error||('Preview failed (HTTP '+r.status+')')); return; }
+    if(d.available===false){ el.textContent=d.reason||'Preview unavailable.'; postHeight(); return; }
+    el.innerHTML=`<span class="ok">${d.matching}</span> of ${d.linked} linked member(s) match`
+      +(dirty?` · <span style="color:#fbbf24">Preview of unsaved rule</span>`:``);
+  }catch(e){ postToast('Network error: '+e); }
+  finally{ btn.disabled=false; btn.textContent=orig; postHeight(); }
+}
+async function doSave(){
+  const cfg=state._edit;
+  // A relation rule needs a connected channel; saving one without it grants to
+  // nobody. Same guard the backend enforces, so the two never disagree.
+  if(!cfg.grant_on_any_relation && (cfg.groups||[]).length>0 && !(state.channel&&state.channel.connected)){
+    postToast('Connect the Twitch channel this rule checks against before saving — '
+      +'without a connected channel it grants the role to nobody.');
+    return;
+  }
+  const payload={ rule_tree_version:state.rule_tree_version,
+    grant_on_any_relation:cfg.grant_on_any_relation,
+    groups: cfg.grant_on_any_relation?[]:(cfg.groups||[]) };
+  try{
+    const r=await fetch(`${BASE_URL}/admin/${GUILD_ID}/role/${ROLE_ID}/save`,
+      {method:'POST',headers:apiHeaders(),credentials:apiCreds(),body:JSON.stringify(payload)});
+    const d=await r.json().catch(()=>({}));
+    if(r.status===409){ postToast('Changed in another tab. Reload to get the latest, then re-apply.'); return; }
+    if(!r.ok){ postToast(d.error||('Save failed (HTTP '+r.status+')')); return; }
+    state.rule_tree_version=d.rule_tree_version; state.config=JSON.parse(JSON.stringify(cfg));
+    setDirty(false); postSaved();
+    postToast('Saved ✓  Roles update within a minute. Make sure members link Twitch using the link above.','success');
+    autoPreview();
+  }catch(e){ postToast('Network error: '+e); }
+}
+
+async function refreshFromServer(){
+  if(!state||refreshInFlight) return; refreshInFlight=true;
+  try{
+    const r=await fetch(`${BASE_URL}/admin/${GUILD_ID}/role/${ROLE_ID}/data`,
+      {headers:apiHeaders(),credentials:apiCreds(),cache:'no-store'});
+    if(r.ok){ const d=await r.json();
+      const chCh=JSON.stringify(d.channel)!==JSON.stringify(state.channel);
+      const cfgCh=JSON.stringify(d.config)!==JSON.stringify(state.config);
+      if(chCh) state.channel=d.channel;
+      if(cfgCh&&!dirty){ state.config=d.config; state._edit=JSON.parse(JSON.stringify(d.config));
+        state.rule_tree_version=d.rule_tree_version; state._preset=detectPreset(state._edit);
+        state._n=guessN(state._edit); state._t=guessTier(state._edit); }
+      if(chCh||(cfgCh&&!dirty)){ render(); autoPreview(); } }
+  }catch(_){}
+  finally{ refreshInFlight=false; }
+}
+window.addEventListener('message',e=>{ if(e.data&&e.data.type==='rl:visible') refreshFromServer(); });
+window.addEventListener('focus',refreshFromServer);
+document.addEventListener('visibilitychange',()=>{ if(!document.hidden) refreshFromServer(); });
+if(!IS_EMBEDDED) window.addEventListener('beforeunload',e=>{ if(dirty){ e.preventDefault(); e.returnValue=''; } });
+
+load();
+</script>
+</body>
+</html>

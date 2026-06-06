@@ -315,7 +315,7 @@ pub async fn verify_page(State(state): State<Arc<AppState>>) -> Response {
         .into_response()
 }
 
-pub async fn login(State(state): State<Arc<AppState>>) -> Result<Redirect, AppError> {
+pub async fn login() -> Result<Redirect, AppError> {
     let return_to = "/twitch-follower-role/verify";
     let url = format!(
         "/auth/login?return_to={}",

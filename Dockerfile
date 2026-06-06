@@ -11,6 +11,7 @@ RUN mkdir src && echo "fn main() {}" > src/main.rs && \
 COPY favicon.ico ./
 COPY src/ src/
 COPY migrations/ migrations/
+COPY templates/ templates/
 RUN cargo build --release && strip target/release/twitch-follower-role
 
 FROM debian:bookworm-slim

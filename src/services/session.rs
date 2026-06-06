@@ -1,6 +1,8 @@
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
 
+use crate::services::rl_token::constant_time_eq;
+
 type HmacSha256 = Hmac<Sha256>;
 
 /// Verify and extract (discord_id, display_name) from a signed session cookie
@@ -28,7 +30,7 @@ pub fn verify_session(cookie_value: &str, secret: &str) -> Option<(String, Strin
     mac.update(payload.as_bytes());
 
     let expected_sig = hex::encode(mac.finalize().into_bytes());
-    if sig != expected_sig {
+    if !constant_time_eq(sig.as_bytes(), expected_sig.as_bytes()) {
         return None;
     }
 

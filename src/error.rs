@@ -25,6 +25,15 @@ pub enum AppError {
     #[error("Unauthorized")]
     Unauthorized,
 
+    #[error("{0}")]
+    UnauthorizedWith(String),
+
+    #[error("Forbidden: {0}")]
+    Forbidden(String),
+
+    #[error("Configuration changed in another tab")]
+    StaleVersion,
+
     #[error("Not found: {0}")]
     NotFound(String),
 
@@ -56,6 +65,12 @@ impl IntoResponse for AppError {
             AppError::Unauthorized => {
                 (StatusCode::UNAUTHORIZED, "Invalid or missing authorization")
             }
+            AppError::UnauthorizedWith(msg) => (StatusCode::UNAUTHORIZED, msg.as_str()),
+            AppError::Forbidden(msg) => (StatusCode::FORBIDDEN, msg.as_str()),
+            AppError::StaleVersion => (
+                StatusCode::CONFLICT,
+                "This configuration changed in another tab. Reload to get the latest, then re-apply.",
+            ),
             AppError::NotFound(msg) => (StatusCode::NOT_FOUND, msg.as_str()),
             AppError::Internal(e) => {
                 tracing::error!("Internal error: {e}");
