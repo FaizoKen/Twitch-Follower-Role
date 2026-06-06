@@ -348,6 +348,20 @@ pub async fn status(
             .ok()
             .flatten();
 
+            // Keep the cached Discord display name fresh for the public users
+            // list (and backfill members who linked before this was added).
+            // One cheap write, only when the name actually changed.
+            if twitch.is_some() {
+                let _ = sqlx::query(
+                    "UPDATE linked_accounts SET discord_name = $1 \
+                     WHERE discord_id = $2 AND discord_name IS DISTINCT FROM $1",
+                )
+                .bind(&display_name)
+                .bind(&discord_id)
+                .execute(&state.pool)
+                .await;
+            }
+
             Json(json!({
                 "discord_id": discord_id,
                 "discord_name": display_name,
@@ -421,6 +435,7 @@ pub async fn twitch_login(
 
 pub async fn twitch_callback(
     State(state): State<Arc<AppState>>,
+    jar: CookieJar,
     Query(query): Query<CallbackQuery>,
 ) -> Result<Redirect, AppError> {
     // Validate state and extract discord_id
@@ -437,6 +452,15 @@ pub async fn twitch_callback(
         .ok_or(AppError::Internal("Missing discord_id in state".into()))?
         .to_string();
     let guild_id = oauth_state.0["guild_id"].as_str().map(String::from);
+
+    // Opportunistically capture the member's Discord display name from the
+    // signed session cookie (for the public users list). Only trust it if the
+    // session belongs to the same Discord user this link is bound to; otherwise
+    // store nothing and let it backfill on the next verify-page visit.
+    let discord_name: Option<String> = get_session(&jar, &state.config.session_secret)
+        .ok()
+        .filter(|(sid, _)| *sid == discord_id)
+        .map(|(_, name)| name);
 
     // Exchange code for token
     let redirect_uri = state.config.twitch_user_oauth_redirect_uri();
@@ -462,12 +486,17 @@ pub async fn twitch_callback(
                 "This Twitch account is already linked to another Discord user".into(),
             ));
         }
-        // Already linked to this user, update login
-        sqlx::query("UPDATE linked_accounts SET twitch_login = $1 WHERE discord_id = $2")
-            .bind(&twitch_user.login)
-            .bind(&discord_id)
-            .execute(&state.pool)
-            .await?;
+        // Already linked to this user, update login (+ refresh name if known).
+        // COALESCE keeps any previously stored name when the cookie is absent.
+        sqlx::query(
+            "UPDATE linked_accounts SET twitch_login = $1, \
+             discord_name = COALESCE($3, discord_name) WHERE discord_id = $2",
+        )
+        .bind(&twitch_user.login)
+        .bind(&discord_id)
+        .bind(&discord_name)
+        .execute(&state.pool)
+        .await?;
     } else {
         // Check if this Discord user already has a different Twitch linked
         sqlx::query("DELETE FROM linked_accounts WHERE discord_id = $1")
@@ -476,11 +505,13 @@ pub async fn twitch_callback(
             .await?;
 
         sqlx::query(
-            "INSERT INTO linked_accounts (discord_id, twitch_user_id, twitch_login) VALUES ($1, $2, $3)",
+            "INSERT INTO linked_accounts (discord_id, twitch_user_id, twitch_login, discord_name) \
+             VALUES ($1, $2, $3, $4)",
         )
         .bind(&discord_id)
         .bind(&twitch_user.id)
         .bind(&twitch_user.login)
+        .bind(&discord_name)
         .execute(&state.pool)
         .await?;
     }

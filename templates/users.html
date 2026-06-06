@@ -88,7 +88,7 @@
 </div>
 
 <div id="toolbar" class="toolbar" style="display:none">
-  <input id="q" class="search" type="search" placeholder="Search Twitch username or Discord ID…" autocomplete="off">
+  <input id="q" class="search" type="search" placeholder="Search Discord name, Twitch username, or Discord ID…" autocomplete="off">
   <button class="filter active" data-f="all">All</button>
   <button class="filter" data-f="is_subscriber">Subscribers</button>
   <button class="filter" data-f="is_follower">Followers</button>
@@ -130,7 +130,7 @@ function badges(u){
 
 function matchesSearch(u, q){
   if (!q) return true;
-  const hay = [u.username, u.discord_id].filter(Boolean).join(' ').toLowerCase();
+  const hay = [u.discord_name, u.username, u.discord_id].filter(Boolean).join(' ').toLowerCase();
   return hay.includes(q);
 }
 
@@ -153,12 +153,15 @@ function render(){
   const body = rows.map(u => {
     const followed = u.followed_at ? esc(u.followed_at.slice(0,10)) : '—';
     const linked   = u.linked_at ? esc(u.linked_at.slice(0,10)) : '—';
+    const discord  = u.discord_name
+      ? esc(u.discord_name)
+      : `<span class="meta">${esc(u.discord_id || '—')}</span>`;
     return `<tr>
-      <td class="row-head" data-label="Twitch">${esc(u.username)}</td>
+      <td class="row-head" data-label="Discord">${discord}</td>
+      <td data-label="Twitch">${esc(u.username)}</td>
       <td data-label="Status">${badges(u)}</td>
       <td data-label="Followed"><span class="meta">${followed}</span></td>
       <td data-label="Linked"><span class="meta">${linked}</span></td>
-      <td data-label="Discord ID"><span class="meta">${esc(u.discord_id || '—')}</span></td>
     </tr>`;
   }).join('');
 
@@ -166,7 +169,7 @@ function render(){
     <div class="tablewrap">
       <table>
         <thead><tr>
-          <th>Twitch</th><th>Status</th><th>Followed</th><th>Linked</th><th>Discord ID</th>
+          <th>Discord</th><th>Twitch</th><th>Status</th><th>Followed</th><th>Linked</th>
         </tr></thead>
         <tbody>${body}</tbody>
       </table>

@@ -89,6 +89,7 @@ pub async fn users_data(
         _,
         (
             String,
+            Option<String>,
             String,
             bool,
             bool,
@@ -98,6 +99,7 @@ pub async fn users_data(
         ),
     >(
         "SELECT la.discord_id, \
+                la.discord_name, \
                 la.twitch_login, \
                 COALESCE(bool_or(ucc.is_following),  false) AS is_follower, \
                 COALESCE(bool_or(ucc.is_subscribed), false) AS is_subscriber, \
@@ -111,7 +113,7 @@ pub async fn users_data(
                 ON ucc.twitch_user_id = la.twitch_user_id \
                AND ucc.broadcaster_id = rl.broadcaster_id \
          WHERE la.discord_id = ANY($2) \
-         GROUP BY la.discord_id, la.twitch_login, la.linked_at \
+         GROUP BY la.discord_id, la.discord_name, la.twitch_login, la.linked_at \
          ORDER BY la.twitch_login ASC \
          LIMIT 1000",
     )
@@ -123,9 +125,10 @@ pub async fn users_data(
     let users = rows
         .into_iter()
         .map(
-            |(discord_id, username, is_follower, is_subscriber, sub_tier, followed_at, linked_at)| {
+            |(discord_id, discord_name, username, is_follower, is_subscriber, sub_tier, followed_at, linked_at)| {
                 json!({
                     "discord_id": discord_id,
+                    "discord_name": discord_name,
                     "username": username,
                     "is_follower": is_follower,
                     "is_subscriber": is_subscriber,
