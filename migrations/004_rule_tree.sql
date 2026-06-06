@@ -15,6 +15,13 @@ ALTER TABLE role_links
 -- re-run on each startup). Converting here, then dropping `conditions`, makes
 -- the legacy column vestigial and prevents a later "nobody" rule from being
 -- silently resurrected from stale legacy data.
+--
+-- Numeric fields are extracted defensively: the legacy `min_follow_days` was an
+-- i64 and could hold values far beyond int4 range (a production row had 1e16),
+-- so we (a) only cast clean 1-18 digit integers (≤ i64 range), (b) cast to
+-- bigint, and (c) clamp to int4 max. Anything malformed/huge collapses to the
+-- default, which is behaviourally identical to the old evaluator (a follow-age
+-- bound nobody can satisfy already matched no one).
 DO $$
 BEGIN
     IF EXISTS (
@@ -24,38 +31,45 @@ BEGIN
         UPDATE role_links SET rule_tree = jsonb_build_object(
             'grant_on_any_relation', false,
             'groups',
-            CASE WHEN cond_array = '[]'::jsonb THEN '[]'::jsonb
-                 ELSE jsonb_build_array(jsonb_build_object('conditions', cond_array))
+            CASE WHEN computed.cond_array = '[]'::jsonb THEN '[]'::jsonb
+                 ELSE jsonb_build_array(jsonb_build_object('conditions', computed.cond_array))
             END
         )
         FROM (
             SELECT id,
                 (
-                    (CASE WHEN COALESCE((conditions->>'require_follower')::boolean, false)
+                    (CASE WHEN req_follower
                           THEN jsonb_build_array(jsonb_build_object(
                                    'target', 'is_follower', 'operator', 'eq', 'value', true))
                           ELSE '[]'::jsonb END)
                     ||
-                    (CASE WHEN COALESCE((conditions->>'require_follower')::boolean, false)
-                           AND COALESCE((conditions->>'min_follow_days')::int, 0) > 0
+                    (CASE WHEN req_follower AND min_days > 0
                           THEN jsonb_build_array(jsonb_build_object(
-                                   'target', 'follow_age_days', 'operator', 'gte',
-                                   'value', (conditions->>'min_follow_days')::int))
+                                   'target', 'follow_age_days', 'operator', 'gte', 'value', min_days))
                           ELSE '[]'::jsonb END)
                     ||
-                    (CASE WHEN COALESCE((conditions->>'require_subscriber')::boolean, false)
+                    (CASE WHEN req_subscriber
                           THEN jsonb_build_array(jsonb_build_object(
                                    'target', 'is_subscriber', 'operator', 'eq', 'value', true))
                           ELSE '[]'::jsonb END)
                     ||
-                    (CASE WHEN COALESCE((conditions->>'require_subscriber')::boolean, false)
-                           AND COALESCE((conditions->>'min_sub_tier')::int, 1) > 1
+                    (CASE WHEN req_subscriber AND min_tier > 1
                           THEN jsonb_build_array(jsonb_build_object(
-                                   'target', 'sub_tier', 'operator', 'gte',
-                                   'value', (conditions->>'min_sub_tier')::int))
+                                   'target', 'sub_tier', 'operator', 'gte', 'value', min_tier))
                           ELSE '[]'::jsonb END)
                 ) AS cond_array
-            FROM role_links
+            FROM (
+                SELECT id,
+                    COALESCE((conditions->>'require_follower')::boolean, false)   AS req_follower,
+                    COALESCE((conditions->>'require_subscriber')::boolean, false) AS req_subscriber,
+                    CASE WHEN conditions->>'min_follow_days' ~ '^[0-9]{1,18}$'
+                         THEN LEAST((conditions->>'min_follow_days')::bigint, 2147483647)
+                         ELSE 0 END AS min_days,
+                    CASE WHEN conditions->>'min_sub_tier' ~ '^[0-9]{1,18}$'
+                         THEN LEAST((conditions->>'min_sub_tier')::bigint, 2147483647)
+                         ELSE 1 END AS min_tier
+                FROM role_links
+            ) cleaned
         ) AS computed
         WHERE role_links.id = computed.id;
 
