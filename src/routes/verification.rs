@@ -70,11 +70,18 @@ pub fn render_verify_page(base_url: &str) -> String {
         .manage-link {{ font-size: 13px; color: #94a3b8; margin-top: 14px; }}
         .manage-link a {{ color: #bf94ff; }}
         .refresh-note {{ font-size: 13px; color: #94a3b8; margin-top: 10px; min-height: 18px; transition: color .15s; }}
+        .step-label {{ color: #fff; font-size: 16px; font-weight: 600; margin-bottom: 6px; }}
+        .channel-list {{ display: flex; flex-direction: column; gap: 8px; margin-top: 8px; }}
+        .channel-row {{ display: flex; align-items: center; justify-content: space-between; gap: 12px; background: #0e0e10; border: 1px solid #2a2a2e; border-radius: 8px; padding: 10px 12px; }}
+        .channel-meta {{ display: flex; flex-direction: column; gap: 2px; min-width: 0; }}
+        .channel-name {{ color: #fff; font-weight: 600; font-size: 14px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }}
+        a.channel-open {{ flex-shrink: 0; background: #9146ff; color: #fff; text-decoration: none; font-size: 13px; font-weight: 600; padding: 8px 14px; border-radius: 6px; transition: background .15s; }}
+        a.channel-open:hover {{ background: #772ce8; }}
     </style>
 </head>
 <body>
     <h1>Twitch Follower Role</h1>
-    <p class="subtitle">Link your Discord and Twitch accounts</p>
+    <p class="subtitle">Everything's on this page: follow on Twitch, link your Discord + Twitch accounts, and your server roles are assigned automatically.</p>
 
     <!-- Server context banner: only shown when ?guild=<id> is present in the URL.
          Lets a server admin share a per-guild link that both verifies the user
@@ -84,16 +91,28 @@ pub fn render_verify_page(base_url: &str) -> String {
         <span id="guild-ctx-text"></span>
     </div>
 
+    <!-- Step 1: follow / subscribe. Always visible (instructional — the real
+         follow/sub is detected once linked), lists the channel(s) this server's
+         roles check against, each linking straight to Twitch so the admin
+         doesn't have to paste the link separately. -->
+    <div id="follow-section" class="card">
+        <div class="step-label">Step 1: Follow on Twitch</div>
+        <p>Open the channel below and follow it — or subscribe, if the role you want needs a sub. We pick it up automatically once your accounts are linked.</p>
+        <div class="channel-list" id="channel-list">
+            <p style="color:#7a8299; font-size:13px;">Loading channel…</p>
+        </div>
+    </div>
+
     <div id="loading" class="card"><p>Loading...</p></div>
     <div id="login" class="card hidden">
-        <p>Sign in with Discord to get started.</p>
+        <p><strong>Step 2:</strong> Sign in with Discord to get started.</p>
         <div class="actions">
             <a href="{base_url}/verify/login" class="btn btn-discord">Login with Discord</a>
         </div>
     </div>
     <div id="link-twitch" class="card hidden">
         <p>Logged in as <strong id="discord-name"></strong> <span class="badge badge-ok">Discord</span></p>
-        <p style="margin-top:12px;">Now link your Twitch account:</p>
+        <p style="margin-top:12px;"><strong>Step 3:</strong> Now link your Twitch account:</p>
         <div class="actions">
             <a href="{base_url}/verify/twitch" class="btn btn-twitch">Link Twitch Account</a>
             <button onclick="doLogout()" class="btn btn-secondary">Logout</button>
@@ -227,6 +246,45 @@ pub fn render_verify_page(base_url: &str) -> String {
         }}
     }}
 
+    function escHtml(s) {{
+        return String(s).replace(/[&<>"']/g, c => ({{'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}})[c]);
+    }}
+
+    // Step 1 ("follow"): list the Twitch channel(s) this server's roles check
+    // against so the user can follow straight from here. Public endpoint — runs
+    // before sign-in. Best-effort; falls back to generic copy on any failure.
+    async function loadChannels() {{
+        const list = document.getElementById('channel-list');
+        if (!list) return;
+        try {{
+            const url = '{base_url}/verify/channels' + (guildId ? ('?guild=' + encodeURIComponent(guildId)) : '');
+            const res = await fetch(url, {{ cache: 'no-store' }});
+            const d = await res.json().catch(() => ({{}}));
+            renderChannels((d && d.channels) || []);
+        }} catch (e) {{
+            renderChannels([]);
+        }}
+    }}
+
+    function renderChannels(channels) {{
+        const list = document.getElementById('channel-list');
+        if (!list) return;
+        if (!channels.length) {{
+            list.innerHTML = '<p style="color:#94a3b8; font-size:13px;">' + (guildId
+                ? "This server hasn't connected its Twitch channel yet. You can still sign in and link below — your role applies once it does."
+                : "Open the Twitch channel your server uses and follow (or subscribe to) it, then continue below.") + '</p>';
+            return;
+        }}
+        list.innerHTML = channels.map(c => {{
+            const login = c.login || '';
+            const href = 'https://www.twitch.tv/' + encodeURIComponent(login);
+            return '<div class="channel-row">' +
+                '<span class="channel-meta"><span class="channel-name">' + escHtml(login) + '</span></span>' +
+                '<a class="channel-open" href="' + href + '" target="_blank" rel="noopener">Follow &rarr;</a>' +
+            '</div>';
+        }}).join('');
+    }}
+
     async function init() {{
         try {{
             const r = await fetch('{base_url}/verify/status', {{credentials:'include'}});
@@ -299,6 +357,7 @@ pub fn render_verify_page(base_url: &str) -> String {
         el.textContent = msg;
         el.classList.remove('hidden');
     }}
+    loadChannels();
     init();
     </script>
 </body>
@@ -374,6 +433,44 @@ pub async fn status(
             "twitch_login": null,
         })),
     }
+}
+
+#[derive(Deserialize)]
+pub struct VerifyChannelsQuery {
+    pub guild: Option<String>,
+}
+
+/// Public (no auth): the Twitch channel(s) this guild's roles check against, so
+/// the verify page can render its "follow" step before the user signs in.
+/// Returns only the broadcaster logins the admin already advertises ("follow
+/// our channel") — nothing sensitive. An invalid or missing `guild` yields an
+/// empty list, so the page falls back to generic copy without a wasted query.
+pub async fn verify_channels(
+    State(state): State<Arc<AppState>>,
+    Query(q): Query<VerifyChannelsQuery>,
+) -> Result<Json<Value>, AppError> {
+    let guild_id = q.guild.unwrap_or_default();
+    let valid =
+        (5..=25).contains(&guild_id.len()) && guild_id.bytes().all(|b| b.is_ascii_digit());
+    if !valid {
+        return Ok(Json(json!({ "channels": [] })));
+    }
+
+    let logins: Vec<String> = sqlx::query_scalar(
+        "SELECT DISTINCT broadcaster_login FROM role_links \
+         WHERE guild_id = $1 AND broadcaster_id IS NOT NULL \
+           AND broadcaster_login IS NOT NULL \
+         ORDER BY broadcaster_login LIMIT 50",
+    )
+    .bind(&guild_id)
+    .fetch_all(&state.pool)
+    .await?;
+
+    let channels: Vec<Value> = logins
+        .into_iter()
+        .map(|login| json!({ "login": login }))
+        .collect();
+    Ok(Json(json!({ "channels": channels })))
 }
 
 #[derive(Deserialize)]

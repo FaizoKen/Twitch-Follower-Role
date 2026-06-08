@@ -124,6 +124,7 @@ async fn main() {
             .route("/users/{guild_id}/data", get(routes::users::users_data))
             // Verification endpoints (user-facing)
             .route("/verify", get(routes::verification::verify_page))
+            .route("/verify/channels", get(routes::verification::verify_channels))
             .route("/verify/login", get(routes::verification::login))
             .route("/verify/status", get(routes::verification::status))
             .route("/verify/refresh", post(routes::verification::refresh))
