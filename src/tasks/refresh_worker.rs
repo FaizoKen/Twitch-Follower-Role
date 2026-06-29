@@ -42,11 +42,10 @@ impl CachedInterval {
         let mut last = self.last_computed.lock().await;
         if last.elapsed() >= std::time::Duration::from_secs(INTERVAL_CACHE_SECS) {
             // Count cache entries (each needs 2 API calls: follow + sub check)
-            let cache_count: i64 =
-                sqlx::query_scalar("SELECT COUNT(*) FROM user_channel_cache")
-                    .fetch_one(pool)
-                    .await
-                    .unwrap_or(0);
+            let cache_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM user_channel_cache")
+                .fetch_one(pool)
+                .await
+                .unwrap_or(0);
 
             let interval = if cache_count == 0 {
                 MIN_REFRESH_SECS
@@ -141,7 +140,7 @@ pub async fn run(state: Arc<AppState>) {
                                        refresh_tok: &mut String,
                                        broadcaster_id: &str,
                                        token_refreshed: &mut bool|
-              -> Result<(), crate::error::AppError> {
+               -> Result<(), crate::error::AppError> {
             if *token_refreshed {
                 return Err(crate::error::AppError::TwitchApi(
                     "Token already refreshed this cycle, still failing".into(),
@@ -190,7 +189,11 @@ pub async fn run(state: Arc<AppState>) {
 
         if is_twitch_unauthorized(&follower_result)
             && try_refresh_token(
-                &state, &mut access_token, &mut refresh_tok, &broadcaster_id, &mut token_refreshed,
+                &state,
+                &mut access_token,
+                &mut refresh_tok,
+                &broadcaster_id,
+                &mut token_refreshed,
             )
             .await
             .is_ok()
@@ -210,7 +213,11 @@ pub async fn run(state: Arc<AppState>) {
 
         if is_twitch_unauthorized(&sub_result)
             && try_refresh_token(
-                &state, &mut access_token, &mut refresh_tok, &broadcaster_id, &mut token_refreshed,
+                &state,
+                &mut access_token,
+                &mut refresh_tok,
+                &broadcaster_id,
+                &mut token_refreshed,
             )
             .await
             .is_ok()
@@ -260,7 +267,11 @@ pub async fn run(state: Arc<AppState>) {
                 .execute(&state.pool)
                 .await
                 {
-                    tracing::error!(twitch_user_id, broadcaster_id, "Failed to update cache: {e}");
+                    tracing::error!(
+                        twitch_user_id,
+                        broadcaster_id,
+                        "Failed to update cache: {e}"
+                    );
                     continue;
                 }
 
@@ -295,7 +306,11 @@ pub async fn run(state: Arc<AppState>) {
                 .execute(&state.pool)
                 .await;
 
-                tracing::warn!(twitch_user_id, broadcaster_id, "Twitch API fetch failed: {e}");
+                tracing::warn!(
+                    twitch_user_id,
+                    broadcaster_id,
+                    "Twitch API fetch failed: {e}"
+                );
             }
         }
     }

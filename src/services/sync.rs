@@ -95,7 +95,16 @@ pub async fn sync_for_user(discord_id: &str, state: &AppState) -> Result<(), App
     }
 
     // Cached (broadcaster_id → facts) for this user across all channels.
-    let cache_rows = sqlx::query_as::<_, (String, bool, Option<chrono::DateTime<chrono::Utc>>, bool, i32)>(
+    let cache_rows = sqlx::query_as::<
+        _,
+        (
+            String,
+            bool,
+            Option<chrono::DateTime<chrono::Utc>>,
+            bool,
+            i32,
+        ),
+    >(
         "SELECT broadcaster_id, is_following, followed_at, is_subscribed, sub_tier \
          FROM user_channel_cache WHERE twitch_user_id = $1",
     )
@@ -105,17 +114,19 @@ pub async fn sync_for_user(discord_id: &str, state: &AppState) -> Result<(), App
 
     let cache_map: std::collections::HashMap<String, CacheData> = cache_rows
         .into_iter()
-        .map(|(bid, is_following, followed_at, is_subscribed, sub_tier)| {
-            (
-                bid,
-                CacheData {
-                    is_following,
-                    followed_at,
-                    is_subscribed,
-                    sub_tier,
-                },
-            )
-        })
+        .map(
+            |(bid, is_following, followed_at, is_subscribed, sub_tier)| {
+                (
+                    bid,
+                    CacheData {
+                        is_following,
+                        followed_at,
+                        is_subscribed,
+                        sub_tier,
+                    },
+                )
+            },
+        )
         .collect();
 
     let existing: HashSet<(String, String)> = sqlx::query_as::<_, (String, String)>(
@@ -143,9 +154,7 @@ pub async fn sync_for_user(discord_id: &str, state: &AppState) -> Result<(), App
     let mut actions: Vec<Action> = Vec::new();
     for (guild_id, role_id, api_token, rule_tree, broadcaster_id) in &role_links {
         let tree: RuleTree = serde_json::from_value(rule_tree.clone()).unwrap_or_default();
-        let facts = broadcaster_id
-            .as_deref()
-            .and_then(|bid| cache_map.get(bid));
+        let facts = broadcaster_id.as_deref().and_then(|bid| cache_map.get(bid));
         let q = qualifies(&tree, broadcaster_id.as_deref(), facts);
         let currently_assigned = existing.contains(&(guild_id.clone(), role_id.clone()));
         match (q, currently_assigned) {
@@ -302,15 +311,15 @@ pub async fn sync_for_role_link(
     }
 
     // RoleLogic user limit (caps the qualifying set).
-    let (_user_count, user_limit) = match rl_client.get_user_info(guild_id, role_id, &api_token).await
-    {
-        Ok(v) => v,
-        Err(AppError::RoleLinkNotFound) => {
-            delete_orphan_role_link(guild_id, role_id, pool).await;
-            return Ok(());
-        }
-        Err(_) => (0, 100),
-    };
+    let (_user_count, user_limit) =
+        match rl_client.get_user_info(guild_id, role_id, &api_token).await {
+            Ok(v) => v,
+            Err(AppError::RoleLinkNotFound) => {
+                delete_orphan_role_link(guild_id, role_id, pool).await;
+                return Ok(());
+            }
+            Err(_) => (0, 100),
+        };
 
     // Build the qualifying-id query. Channel-agnostic grant skips the cache
     // join entirely; otherwise we LEFT JOIN this broadcaster's cache and push
@@ -352,7 +361,9 @@ pub async fn sync_for_role_link(
 
     if !qualifying_ids.is_empty() && qualifying_ids.len() == user_limit {
         tracing::warn!(
-            guild_id, role_id, user_limit,
+            guild_id,
+            role_id,
+            user_limit,
             "Role link user limit reached: at least {user_limit} users qualify"
         );
     }
@@ -445,7 +456,9 @@ pub async fn remove_all_assignments(discord_id: &str, state: &AppState) -> Resul
             }
             Err(e) => {
                 tracing::error!(
-                    guild_id, role_id, discord_id,
+                    guild_id,
+                    role_id,
+                    discord_id,
                     "Failed to remove user during unlink: {e}"
                 );
             }

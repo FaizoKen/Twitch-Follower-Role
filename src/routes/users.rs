@@ -125,7 +125,16 @@ pub async fn users_data(
     let users = rows
         .into_iter()
         .map(
-            |(discord_id, discord_name, username, is_follower, is_subscriber, sub_tier, followed_at, linked_at)| {
+            |(
+                discord_id,
+                discord_name,
+                username,
+                is_follower,
+                is_subscriber,
+                sub_tier,
+                followed_at,
+                linked_at,
+            )| {
                 json!({
                     "discord_id": discord_id,
                     "discord_name": discord_name,

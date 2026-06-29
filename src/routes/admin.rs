@@ -482,7 +482,10 @@ async fn require_role_config_access(
                 "Token does not grant access to this role link.".into(),
             ));
         }
-        return Ok(RoleConfigAccess { discord_id: s.discord_id, read_only: s.read_only });
+        return Ok(RoleConfigAccess {
+            discord_id: s.discord_id,
+            read_only: s.read_only,
+        });
     }
     // Reuse the guild-scoped gate's cookie path (manager check).
     let discord_id = require_guild_admin(state, jar, headers, guild_id).await?;
@@ -725,7 +728,13 @@ pub async fn role_config_preview_edit(
     .await?
     .flatten();
 
-    preview_count_for(&state, &guild_id, broadcaster_id.as_deref(), &parsed.rule_tree).await
+    preview_count_for(
+        &state,
+        &guild_id,
+        broadcaster_id.as_deref(),
+        &parsed.rule_tree,
+    )
+    .await
 }
 
 /// Shared core for GET (saved tree) and POST (proposed tree) previews.
@@ -769,11 +778,12 @@ async fn preview_count_for(
         ));
     }
 
-    let linked: i64 =
-        sqlx::query_scalar("SELECT count(*) FROM linked_accounts WHERE discord_id = ANY($1::text[])")
-            .bind(&member_ids)
-            .fetch_one(&state.pool)
-            .await?;
+    let linked: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM linked_accounts WHERE discord_id = ANY($1::text[])",
+    )
+    .bind(&member_ids)
+    .fetch_one(&state.pool)
+    .await?;
 
     // Channel-agnostic "anyone who linked Twitch": every linked member matches.
     if tree.grant_on_any_relation {

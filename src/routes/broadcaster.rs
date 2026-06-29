@@ -91,7 +91,9 @@ pub async fn connect_callback(
     .bind(&query.state)
     .fetch_optional(&state.pool)
     .await?
-    .ok_or(AppError::BadRequest("Invalid or expired OAuth state".into()))?;
+    .ok_or(AppError::BadRequest(
+        "Invalid or expired OAuth state".into(),
+    ))?;
 
     let data = &oauth_state.0;
     let guild_id = data["guild_id"]
@@ -115,10 +117,7 @@ pub async fn connect_callback(
     ))?;
 
     // Get broadcaster info
-    let broadcaster = state
-        .twitch_client
-        .get_user_by_token(&access_token)
-        .await?;
+    let broadcaster = state.twitch_client.get_user_by_token(&access_token).await?;
 
     // Store broadcaster connection on the role link
     sqlx::query(
@@ -155,12 +154,7 @@ pub async fn connect_callback(
     let guild_id_clone = guild_id.clone();
     let role_id_clone = role_id.clone();
     tokio::spawn(async move {
-        if let Err(e) = create_eventsub_subscriptions(
-            &state_clone,
-            &broadcaster_id,
-        )
-        .await
-        {
+        if let Err(e) = create_eventsub_subscriptions(&state_clone, &broadcaster_id).await {
             tracing::error!(
                 broadcaster_id,
                 broadcaster_login,
@@ -190,7 +184,12 @@ pub async fn connect_callback(
         .replace("{{TWITCH_LOGIN}}", &login_safe)
         .replace("{{GUILD_ID}}", &guild_id);
 
-    Ok((StatusCode::OK, [("content-type", "text/html; charset=utf-8")], html).into_response())
+    Ok((
+        StatusCode::OK,
+        [("content-type", "text/html; charset=utf-8")],
+        html,
+    )
+        .into_response())
 }
 
 /// Best-effort cleanup of a broadcaster's EventSub subscriptions and cached
@@ -306,7 +305,11 @@ async fn create_eventsub_subscriptions(
                 );
             }
             Err(e) => {
-                tracing::error!(broadcaster_id, event_type, "EventSub subscription failed: {e}");
+                tracing::error!(
+                    broadcaster_id,
+                    event_type,
+                    "EventSub subscription failed: {e}"
+                );
             }
         }
     }

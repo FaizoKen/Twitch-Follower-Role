@@ -154,7 +154,9 @@ fn normalize_value(
                 _ => None,
             };
             let n = n.ok_or_else(|| {
-                AppError::BadRequest(format!("{where_}: whole-number value required (got {raw})."))
+                AppError::BadRequest(format!(
+                    "{where_}: whole-number value required (got {raw})."
+                ))
             })?;
             // Twitch sub-tier is 1..=3 on the friendly scale; follow-age can't
             // be negative. Reject obvious nonsense early so a typo surfaces as
@@ -212,20 +214,29 @@ mod tests {
             grant_on_any_relation: false,
             groups: vec![],
         };
-        assert!(matches!(parse_rule_tree(body), Err(AppError::BadRequest(_))));
+        assert!(matches!(
+            parse_rule_tree(body),
+            Err(AppError::BadRequest(_))
+        ));
     }
 
     #[test]
     fn rejects_unknown_target() {
         let body = one_group(vec![input("not_a_target", "eq", json!(true))]);
-        assert!(matches!(parse_rule_tree(body), Err(AppError::BadRequest(_))));
+        assert!(matches!(
+            parse_rule_tree(body),
+            Err(AppError::BadRequest(_))
+        ));
     }
 
     #[test]
     fn rejects_operator_target_mismatch() {
         // gt against a bool is nonsense
         let body = one_group(vec![input("is_follower", "gt", json!(0))]);
-        assert!(matches!(parse_rule_tree(body), Err(AppError::BadRequest(_))));
+        assert!(matches!(
+            parse_rule_tree(body),
+            Err(AppError::BadRequest(_))
+        ));
     }
 
     #[test]
@@ -234,7 +245,10 @@ mod tests {
             grant_on_any_relation: false,
             groups: vec![ConditionGroupInput { conditions: vec![] }],
         };
-        assert!(matches!(parse_rule_tree(body), Err(AppError::BadRequest(_))));
+        assert!(matches!(
+            parse_rule_tree(body),
+            Err(AppError::BadRequest(_))
+        ));
     }
 
     #[test]
@@ -257,13 +271,19 @@ mod tests {
     #[test]
     fn sub_tier_out_of_range_rejected() {
         let body = one_group(vec![input("sub_tier", "gte", json!(4))]);
-        assert!(matches!(parse_rule_tree(body), Err(AppError::BadRequest(_))));
+        assert!(matches!(
+            parse_rule_tree(body),
+            Err(AppError::BadRequest(_))
+        ));
     }
 
     #[test]
     fn negative_follow_age_rejected() {
         let body = one_group(vec![input("follow_age_days", "gte", json!(-5))]);
-        assert!(matches!(parse_rule_tree(body), Err(AppError::BadRequest(_))));
+        assert!(matches!(
+            parse_rule_tree(body),
+            Err(AppError::BadRequest(_))
+        ));
     }
 
     #[test]
@@ -279,7 +299,10 @@ mod tests {
                 }],
             }],
         };
-        assert!(matches!(parse_rule_tree(body), Err(AppError::BadRequest(_))));
+        assert!(matches!(
+            parse_rule_tree(body),
+            Err(AppError::BadRequest(_))
+        ));
     }
 
     #[test]
@@ -314,6 +337,9 @@ mod tests {
             grant_on_any_relation: false,
             groups,
         };
-        assert!(matches!(parse_rule_tree(body), Err(AppError::BadRequest(_))));
+        assert!(matches!(
+            parse_rule_tree(body),
+            Err(AppError::BadRequest(_))
+        ));
     }
 }

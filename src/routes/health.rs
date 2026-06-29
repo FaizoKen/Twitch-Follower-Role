@@ -10,14 +10,18 @@ use crate::AppState;
 
 pub async fn favicon() -> impl IntoResponse {
     (
-        [(header::CONTENT_TYPE, "image/x-icon"), (header::CACHE_CONTROL, "public, max-age=604800")],
+        [
+            (header::CONTENT_TYPE, "image/x-icon"),
+            (header::CACHE_CONTROL, "public, max-age=604800"),
+        ],
         include_bytes!("../../favicon.ico").as_slice(),
     )
 }
 
 async fn check_service(http: &reqwest::Client, name: &str, url: &str) -> Value {
     let start = std::time::Instant::now();
-    let result = tokio::time::timeout(std::time::Duration::from_secs(3), http.get(url).send()).await;
+    let result =
+        tokio::time::timeout(std::time::Duration::from_secs(3), http.get(url).send()).await;
     let latency = start.elapsed().as_millis() as u64;
 
     let is_up = matches!(result, Ok(Ok(_)));
@@ -38,11 +42,7 @@ pub async fn health(State(state): State<Arc<AppState>>) -> Json<Value> {
             .is_ok();
         (ok, start.elapsed().as_millis() as u64)
     };
-    let svc_fut = check_service(
-        &state.http,
-        "Twitch API",
-        "https://api.twitch.tv/helix/",
-    );
+    let svc_fut = check_service(&state.http, "Twitch API", "https://api.twitch.tv/helix/");
 
     let ((db_ok, db_latency), svc_check) = tokio::join!(db_fut, svc_fut);
 

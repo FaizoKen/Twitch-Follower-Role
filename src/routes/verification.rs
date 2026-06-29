@@ -23,8 +23,7 @@ const INITIAL_RECHECK_SECS: i64 = 1800;
 
 fn get_session(jar: &CookieJar, secret: &str) -> Result<(String, String), AppError> {
     let cookie = jar.get(SESSION_COOKIE).ok_or(AppError::Unauthorized)?;
-    session::verify_session(cookie.value(), secret)
-        .ok_or(AppError::Unauthorized)
+    session::verify_session(cookie.value(), secret).ok_or(AppError::Unauthorized)
 }
 
 pub fn render_verify_page(base_url: &str) -> String {
@@ -376,10 +375,7 @@ pub async fn verify_page(State(state): State<Arc<AppState>>) -> Response {
 
 pub async fn login() -> Result<Redirect, AppError> {
     let return_to = "/twitch-follower-role/verify";
-    let url = format!(
-        "/auth/login?return_to={}",
-        urlencoding::encode(return_to),
-    );
+    let url = format!("/auth/login?return_to={}", urlencoding::encode(return_to),);
     Ok(Redirect::temporary(&url))
 }
 
@@ -389,10 +385,7 @@ pub struct CallbackQuery {
     pub state: String,
 }
 
-pub async fn status(
-    State(state): State<Arc<AppState>>,
-    jar: CookieJar,
-) -> Json<Value> {
+pub async fn status(State(state): State<Arc<AppState>>, jar: CookieJar) -> Json<Value> {
     let session = get_session(&jar, &state.config.session_secret);
 
     match session {
@@ -450,8 +443,7 @@ pub async fn verify_channels(
     Query(q): Query<VerifyChannelsQuery>,
 ) -> Result<Json<Value>, AppError> {
     let guild_id = q.guild.unwrap_or_default();
-    let valid =
-        (5..=25).contains(&guild_id.len()) && guild_id.bytes().all(|b| b.is_ascii_digit());
+    let valid = (5..=25).contains(&guild_id.len()) && guild_id.bytes().all(|b| b.is_ascii_digit());
     if !valid {
         return Ok(Json(json!({ "channels": [] })));
     }
@@ -542,7 +534,9 @@ pub async fn twitch_callback(
     .bind(&query.state)
     .fetch_optional(&state.pool)
     .await?
-    .ok_or(AppError::BadRequest("Invalid or expired OAuth state".into()))?;
+    .ok_or(AppError::BadRequest(
+        "Invalid or expired OAuth state".into(),
+    ))?;
 
     let discord_id = oauth_state.0["discord_id"]
         .as_str()
@@ -678,11 +672,16 @@ pub async fn twitch_callback(
             .await
             {
                 Ok(_) => inline_status_known = true,
-                Err(e) => tracing::error!(discord_id, broadcaster_id, "Inline cache update failed: {e}"),
+                Err(e) => tracing::error!(
+                    discord_id,
+                    broadcaster_id,
+                    "Inline cache update failed: {e}"
+                ),
             }
         } else {
             tracing::warn!(
-                discord_id, broadcaster_id,
+                discord_id,
+                broadcaster_id,
                 "Inline follow/sub check failed; deferring to worker"
             );
         }

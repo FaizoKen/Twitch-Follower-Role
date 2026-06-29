@@ -17,19 +17,31 @@ pub async fn eventsub_handler(
     body: Bytes,
 ) -> Response {
     // Extract required headers
-    let message_id = match headers.get("twitch-eventsub-message-id").and_then(|v| v.to_str().ok()) {
+    let message_id = match headers
+        .get("twitch-eventsub-message-id")
+        .and_then(|v| v.to_str().ok())
+    {
         Some(id) => id.to_string(),
         None => return StatusCode::BAD_REQUEST.into_response(),
     };
-    let timestamp = match headers.get("twitch-eventsub-message-timestamp").and_then(|v| v.to_str().ok()) {
+    let timestamp = match headers
+        .get("twitch-eventsub-message-timestamp")
+        .and_then(|v| v.to_str().ok())
+    {
         Some(ts) => ts.to_string(),
         None => return StatusCode::BAD_REQUEST.into_response(),
     };
-    let signature = match headers.get("twitch-eventsub-message-signature").and_then(|v| v.to_str().ok()) {
+    let signature = match headers
+        .get("twitch-eventsub-message-signature")
+        .and_then(|v| v.to_str().ok())
+    {
         Some(sig) => sig.to_string(),
         None => return StatusCode::BAD_REQUEST.into_response(),
     };
-    let message_type = match headers.get("twitch-eventsub-message-type").and_then(|v| v.to_str().ok()) {
+    let message_type = match headers
+        .get("twitch-eventsub-message-type")
+        .and_then(|v| v.to_str().ok())
+    {
         Some(mt) => mt.to_string(),
         None => return StatusCode::BAD_REQUEST.into_response(),
     };
@@ -56,7 +68,12 @@ pub async fn eventsub_handler(
         "webhook_callback_verification" => {
             // Echo back the challenge
             let challenge = payload["challenge"].as_str().unwrap_or("");
-            (StatusCode::OK, [("content-type", "text/plain")], challenge.to_string()).into_response()
+            (
+                StatusCode::OK,
+                [("content-type", "text/plain")],
+                challenge.to_string(),
+            )
+                .into_response()
         }
         "notification" => {
             let event_type = payload["subscription"]["type"].as_str().unwrap_or("");
@@ -84,10 +101,7 @@ pub async fn eventsub_handler(
             let sub_type = payload["subscription"]["type"].as_str().unwrap_or("");
             let status = payload["subscription"]["status"].as_str().unwrap_or("");
 
-            tracing::warn!(
-                sub_id, sub_type, status,
-                "EventSub subscription revoked"
-            );
+            tracing::warn!(sub_id, sub_type, status, "EventSub subscription revoked");
 
             // Remove from DB
             sqlx::query("DELETE FROM eventsub_subscriptions WHERE id = $1")

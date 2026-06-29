@@ -146,10 +146,7 @@ impl TwitchClient {
     }
 
     /// Refresh a user/broadcaster token. Returns (new_access_token, new_refresh_token).
-    pub async fn refresh_token(
-        &self,
-        refresh_token: &str,
-    ) -> Result<(String, String), AppError> {
+    pub async fn refresh_token(&self, refresh_token: &str) -> Result<(String, String), AppError> {
         let resp: TwitchTokenResponse = self
             .http
             .post("https://id.twitch.tv/oauth2/token")
@@ -206,10 +203,7 @@ impl TwitchClient {
         let resp = self
             .http
             .get("https://api.twitch.tv/helix/channels/followers")
-            .query(&[
-                ("broadcaster_id", broadcaster_id),
-                ("user_id", user_id),
-            ])
+            .query(&[("broadcaster_id", broadcaster_id), ("user_id", user_id)])
             .header("Authorization", format!("Bearer {broadcaster_token}"))
             .header("Client-Id", &self.client_id)
             .send()
@@ -260,10 +254,7 @@ impl TwitchClient {
         let resp = self
             .http
             .get("https://api.twitch.tv/helix/subscriptions")
-            .query(&[
-                ("broadcaster_id", broadcaster_id),
-                ("user_id", user_id),
-            ])
+            .query(&[("broadcaster_id", broadcaster_id), ("user_id", user_id)])
             .header("Authorization", format!("Bearer {broadcaster_token}"))
             .header("Client-Id", &self.client_id)
             .send()
@@ -332,7 +323,9 @@ impl TwitchClient {
             .json(&body)
             .send()
             .await
-            .map_err(|e| AppError::TwitchApi(format!("Create EventSub subscription failed: {e}")))?;
+            .map_err(|e| {
+                AppError::TwitchApi(format!("Create EventSub subscription failed: {e}"))
+            })?;
 
         let status = resp.status();
         if !status.is_success() && status != reqwest::StatusCode::ACCEPTED {
@@ -367,12 +360,16 @@ impl TwitchClient {
             .header("Client-Id", &self.client_id)
             .send()
             .await
-            .map_err(|e| AppError::TwitchApi(format!("Delete EventSub subscription failed: {e}")))?;
+            .map_err(|e| {
+                AppError::TwitchApi(format!("Delete EventSub subscription failed: {e}"))
+            })?;
 
         if !resp.status().is_success() {
             let status = resp.status();
             let body = resp.text().await.unwrap_or_default();
-            tracing::warn!("Failed to delete EventSub subscription {subscription_id}: {status} - {body}");
+            tracing::warn!(
+                "Failed to delete EventSub subscription {subscription_id}: {status} - {body}"
+            );
         }
 
         Ok(())

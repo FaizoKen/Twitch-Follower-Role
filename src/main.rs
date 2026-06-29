@@ -65,8 +65,9 @@ async fn main() {
         .timeout(std::time::Duration::from_secs(10))
         .build()
         .expect("Failed to build HTTP client");
-    let verify_html =
-        bytes::Bytes::from(routes::verification::render_verify_page(&app_config.base_url));
+    let verify_html = bytes::Bytes::from(routes::verification::render_verify_page(
+        &app_config.base_url,
+    ));
 
     let state = Arc::new(AppState {
         pool,
@@ -81,8 +82,14 @@ async fn main() {
 
     // Spawn background workers
     tokio::spawn(tasks::refresh_worker::run(Arc::clone(&state)));
-    tokio::spawn(tasks::user_sync_worker::run(user_sync_rx, Arc::clone(&state)));
-    tokio::spawn(tasks::config_sync_worker::run(config_sync_rx, Arc::clone(&state)));
+    tokio::spawn(tasks::user_sync_worker::run(
+        user_sync_rx,
+        Arc::clone(&state),
+    ));
+    tokio::spawn(tasks::config_sync_worker::run(
+        config_sync_rx,
+        Arc::clone(&state),
+    ));
     tokio::spawn(tasks::cleanup_expired(Arc::clone(&state)));
 
     // CORS: explicit allowlist (this plugin's origin + the RoleLogic dashboard
@@ -102,44 +109,74 @@ async fn main() {
         .max_age(std::time::Duration::from_secs(600));
 
     let app = Router::new()
-        .nest("/twitch-follower-role", Router::new()
-            // Plugin endpoints (called by RoleLogic)
-            .route("/register", post(routes::plugin::register))
-            .route("/config", get(routes::plugin::get_config))
-            .route("/config", post(routes::plugin::post_config))
-            .route("/config", delete(routes::plugin::delete_config))
-            // Admin — iframe role-config (deep-linked from the RoleLogic dashboard)
-            .route("/admin/{guild_id}/role/{role_id}", get(routes::admin::role_config_page))
-            .route("/admin/{guild_id}/role/{role_id}/data", get(routes::admin::role_config_data))
-            .route("/admin/{guild_id}/role/{role_id}/save", post(routes::admin::role_config_save))
-            .route(
-                "/admin/{guild_id}/role/{role_id}/preview",
-                get(routes::admin::role_config_preview).post(routes::admin::role_config_preview_edit),
-            )
-            .route("/admin/{guild_id}/role/{role_id}/connect", post(routes::admin::broadcaster_connect))
-            .route("/admin/{guild_id}/role/{role_id}/disconnect", post(routes::admin::broadcaster_disconnect))
-            // Per-guild settings + public linked-users list
-            .route("/admin/{guild_id}/view-permission", post(routes::users::set_view_permission))
-            .route("/users/{guild_id}", get(routes::users::users_page))
-            .route("/users/{guild_id}/data", get(routes::users::users_data))
-            // Verification endpoints (user-facing)
-            .route("/verify", get(routes::verification::verify_page))
-            .route("/verify/channels", get(routes::verification::verify_channels))
-            .route("/verify/login", get(routes::verification::login))
-            .route("/verify/status", get(routes::verification::status))
-            .route("/verify/refresh", post(routes::verification::refresh))
-            .route("/verify/twitch", get(routes::verification::twitch_login))
-            .route("/verify/twitch/callback", get(routes::verification::twitch_callback))
-            .route("/verify/unlink", post(routes::verification::unlink))
-            .route("/verify/logout", post(routes::verification::logout))
-            // Broadcaster connection
-            .route("/connect", get(routes::broadcaster::connect))
-            .route("/connect/callback", get(routes::broadcaster::connect_callback))
-            // EventSub webhook
-            .route("/webhooks/twitch", post(routes::webhooks::eventsub_handler))
-            // Health & static
-            .route("/favicon.ico", get(routes::health::favicon))
-            .route("/health", get(routes::health::health))
+        .nest(
+            "/twitch-follower-role",
+            Router::new()
+                // Plugin endpoints (called by RoleLogic)
+                .route("/register", post(routes::plugin::register))
+                .route("/config", get(routes::plugin::get_config))
+                .route("/config", post(routes::plugin::post_config))
+                .route("/config", delete(routes::plugin::delete_config))
+                // Admin — iframe role-config (deep-linked from the RoleLogic dashboard)
+                .route(
+                    "/admin/{guild_id}/role/{role_id}",
+                    get(routes::admin::role_config_page),
+                )
+                .route(
+                    "/admin/{guild_id}/role/{role_id}/data",
+                    get(routes::admin::role_config_data),
+                )
+                .route(
+                    "/admin/{guild_id}/role/{role_id}/save",
+                    post(routes::admin::role_config_save),
+                )
+                .route(
+                    "/admin/{guild_id}/role/{role_id}/preview",
+                    get(routes::admin::role_config_preview)
+                        .post(routes::admin::role_config_preview_edit),
+                )
+                .route(
+                    "/admin/{guild_id}/role/{role_id}/connect",
+                    post(routes::admin::broadcaster_connect),
+                )
+                .route(
+                    "/admin/{guild_id}/role/{role_id}/disconnect",
+                    post(routes::admin::broadcaster_disconnect),
+                )
+                // Per-guild settings + public linked-users list
+                .route(
+                    "/admin/{guild_id}/view-permission",
+                    post(routes::users::set_view_permission),
+                )
+                .route("/users/{guild_id}", get(routes::users::users_page))
+                .route("/users/{guild_id}/data", get(routes::users::users_data))
+                // Verification endpoints (user-facing)
+                .route("/verify", get(routes::verification::verify_page))
+                .route(
+                    "/verify/channels",
+                    get(routes::verification::verify_channels),
+                )
+                .route("/verify/login", get(routes::verification::login))
+                .route("/verify/status", get(routes::verification::status))
+                .route("/verify/refresh", post(routes::verification::refresh))
+                .route("/verify/twitch", get(routes::verification::twitch_login))
+                .route(
+                    "/verify/twitch/callback",
+                    get(routes::verification::twitch_callback),
+                )
+                .route("/verify/unlink", post(routes::verification::unlink))
+                .route("/verify/logout", post(routes::verification::logout))
+                // Broadcaster connection
+                .route("/connect", get(routes::broadcaster::connect))
+                .route(
+                    "/connect/callback",
+                    get(routes::broadcaster::connect_callback),
+                )
+                // EventSub webhook
+                .route("/webhooks/twitch", post(routes::webhooks::eventsub_handler))
+                // Health & static
+                .route("/favicon.ico", get(routes::health::favicon))
+                .route("/health", get(routes::health::health)),
         )
         .layer(TraceLayer::new_for_http())
         .layer(cors_layer)
