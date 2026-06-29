@@ -16,6 +16,11 @@ const COMMIT_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 /// Because `RoleLinkToken` rows cascade on `RoleLink` delete, getting this
 /// reliably signals the role link has been deleted upstream.
 const RL_LINK_GONE_ERROR_MSG: &str = "Invalid or revoked token";
+/// Body substring RoleLogic returns when the role link exists but its owner
+/// toggled it off. NOT a deletion (that is `RL_LINK_GONE_ERROR_MSG`): leave the
+/// link + config intact and skip syncing it this cycle instead of erroring and
+/// retrying forever. Source: `role-link-token.guard.ts`.
+const RL_LINK_DISABLED_ERROR_MSG: &str = "This role link is disabled";
 
 #[derive(Clone)]
 pub struct RoleLogicClient {
@@ -62,6 +67,10 @@ impl RoleLogicClient {
             if status == reqwest::StatusCode::FORBIDDEN && body.contains(RL_LINK_GONE_ERROR_MSG) {
                 return Err(AppError::RoleLinkNotFound);
             }
+            if status == reqwest::StatusCode::FORBIDDEN && body.contains(RL_LINK_DISABLED_ERROR_MSG)
+            {
+                return Err(AppError::RoleLinkDisabled);
+            }
             return Err(AppError::RoleLogic(format!(
                 "Get user info failed: {status} - {body}"
             )));
@@ -104,6 +113,10 @@ impl RoleLogicClient {
 
             if status == reqwest::StatusCode::FORBIDDEN && body.contains(RL_LINK_GONE_ERROR_MSG) {
                 return Err(AppError::RoleLinkNotFound);
+            }
+            if status == reqwest::StatusCode::FORBIDDEN && body.contains(RL_LINK_DISABLED_ERROR_MSG)
+            {
+                return Err(AppError::RoleLinkDisabled);
             }
 
             if (status == reqwest::StatusCode::BAD_REQUEST
@@ -154,6 +167,10 @@ impl RoleLogicClient {
             if status == reqwest::StatusCode::FORBIDDEN && body.contains(RL_LINK_GONE_ERROR_MSG) {
                 return Err(AppError::RoleLinkNotFound);
             }
+            if status == reqwest::StatusCode::FORBIDDEN && body.contains(RL_LINK_DISABLED_ERROR_MSG)
+            {
+                return Err(AppError::RoleLinkDisabled);
+            }
             return Err(AppError::RoleLogic(format!(
                 "Remove user failed: {status} - {body}"
             )));
@@ -196,6 +213,10 @@ impl RoleLogicClient {
             let body = resp.text().await.unwrap_or_default();
             if status == reqwest::StatusCode::FORBIDDEN && body.contains(RL_LINK_GONE_ERROR_MSG) {
                 return Err(AppError::RoleLinkNotFound);
+            }
+            if status == reqwest::StatusCode::FORBIDDEN && body.contains(RL_LINK_DISABLED_ERROR_MSG)
+            {
+                return Err(AppError::RoleLinkDisabled);
             }
             return Err(AppError::RoleLogic(format!(
                 "Replace users failed: {status} - {body}"
@@ -301,6 +322,10 @@ impl RoleLogicClient {
             let body = resp.text().await.unwrap_or_default();
             if status == reqwest::StatusCode::FORBIDDEN && body.contains(RL_LINK_GONE_ERROR_MSG) {
                 return Err(AppError::RoleLinkNotFound);
+            }
+            if status == reqwest::StatusCode::FORBIDDEN && body.contains(RL_LINK_DISABLED_ERROR_MSG)
+            {
+                return Err(AppError::RoleLinkDisabled);
             }
             return Err(AppError::RoleLogic(format!(
                 "Start upload failed: {status} - {body}"
