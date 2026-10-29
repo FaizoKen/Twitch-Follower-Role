@@ -204,6 +204,9 @@ pub async fn sync_for_user(discord_id: &str, state: &AppState) -> Result<(), App
                                 );
                                 return;
                             }
+                            // Disabled or paused upstream; the next sync after
+                            // the owner turns it back on recomputes it.
+                            Err(AppError::RoleLinkDisabled) => return,
                             Err(e) => {
                                 tracing::error!(
                                     guild_id, role_id, discord_id,
@@ -239,6 +242,7 @@ pub async fn sync_for_user(discord_id: &str, state: &AppState) -> Result<(), App
                                 delete_orphan_role_link(&guild_id, &role_id, &pool).await;
                                 return;
                             }
+                            Err(AppError::RoleLinkDisabled) => return,
                             Err(e) => {
                                 tracing::error!(
                                     guild_id, role_id, discord_id,
@@ -369,6 +373,8 @@ pub async fn sync_for_role_link(
         );
     }
 
+    // A held write (RemovalHeld) goes back to the config sync worker, which
+    // re-checks it later.
     match rl_client
         .upload_users(guild_id, role_id, &qualifying_ids, &api_token)
         .await
@@ -378,6 +384,7 @@ pub async fn sync_for_role_link(
             delete_orphan_role_link(guild_id, role_id, pool).await;
             return Ok(());
         }
+        Err(AppError::RoleLinkDisabled) => return Ok(()),
         Err(e) => return Err(e),
     }
 
@@ -421,6 +428,7 @@ async fn clear_role(
             delete_orphan_role_link(guild_id, role_id, &state.pool).await;
             return Ok(());
         }
+        Err(AppError::RoleLinkDisabled) => return Ok(()),
         Err(e) => return Err(e),
     }
     sqlx::query("DELETE FROM role_assignments WHERE guild_id = $1 AND role_id = $2")

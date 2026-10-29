@@ -16,8 +16,17 @@ pub enum AppError {
     #[error("Role link not found on RoleLogic")]
     RoleLinkNotFound,
 
-    #[error("Role link is disabled on RoleLogic")]
+    /// Switched off by its owner, or paused because the guild is over its
+    /// integration-slot quota. RoleLogic rejects every call for either until
+    /// the owner acts, so both mean "skip this link for now".
+    #[error("Role link is disabled or paused on RoleLogic")]
     RoleLinkDisabled,
+
+    /// RoleLogic's shrink gate is holding this list write until an owner
+    /// confirms the removals in the dashboard. Not a failure: the write goes
+    /// through on the first attempt after they confirm.
+    #[error("Role link removals are held for owner confirmation on RoleLogic")]
+    RemovalHeld,
 
     #[error("Role link user limit reached ({limit})")]
     UserLimitReached { limit: usize },
@@ -61,6 +70,10 @@ impl IntoResponse for AppError {
             }
             AppError::RoleLinkNotFound => (StatusCode::NOT_FOUND, "Role link not found"),
             AppError::RoleLinkDisabled => (StatusCode::FORBIDDEN, "Role link is disabled"),
+            AppError::RemovalHeld => (
+                StatusCode::CONFLICT,
+                "Removals are waiting for confirmation in the RoleLogic dashboard",
+            ),
             AppError::UserLimitReached { limit } => {
                 tracing::warn!("Role link user limit reached: {limit}");
                 (StatusCode::FORBIDDEN, "Role link user limit reached")
