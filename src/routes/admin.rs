@@ -507,8 +507,13 @@ pub async fn role_config_data(
 ) -> Result<Json<Value>, AppError> {
     require_role_config_access(&state, &jar, &headers, &guild_id, &role_id).await?;
 
-    let link = sqlx::query_as::<_, (Option<String>, Option<String>, Value, i32)>(
-        "SELECT broadcaster_id, broadcaster_login, rule_tree, rule_tree_version \
+    // `token_missing`: the refresh worker drops a broadcaster's tokens once
+    // Twitch rejects its refresh token (password changed, app disconnected on
+    // Twitch). The channel is still bound, but nothing can be read from it
+    // until the broadcaster signs in again.
+    let link = sqlx::query_as::<_, (Option<String>, Option<String>, Value, i32, bool)>(
+        "SELECT broadcaster_id, broadcaster_login, rule_tree, rule_tree_version, \
+                broadcaster_access_token IS NULL \
          FROM role_links WHERE guild_id = $1 AND role_id = $2",
     )
     .bind(&guild_id)
@@ -518,7 +523,8 @@ pub async fn role_config_data(
     .ok_or_else(|| {
         AppError::NotFound("This role link doesn't exist. Has it been added in RoleLogic?".into())
     })?;
-    let (broadcaster_id, broadcaster_login, rule_tree, rule_tree_version) = link;
+    let (broadcaster_id, broadcaster_login, rule_tree, rule_tree_version, token_missing) = link;
+    let needs_reconnect = broadcaster_id.is_some() && token_missing;
     let tree: RuleTree = serde_json::from_value(rule_tree).unwrap_or_default();
 
     // Surface the public users-list settings here so admins discover the
@@ -543,6 +549,7 @@ pub async fn role_config_data(
         "rule_tree_version": rule_tree_version,
         "channel": {
             "connected": broadcaster_id.is_some(),
+            "needs_reconnect": needs_reconnect,
             "broadcaster_id": broadcaster_id,
             "broadcaster_login": broadcaster_login,
         },
@@ -745,15 +752,22 @@ async fn preview_count_for(
     tree: &RuleTree,
 ) -> Result<Json<Value>, AppError> {
     // A rule grants to nobody when it is NOT channel-agnostic AND it has no
-    // channel bound or no groups. `grant_on_any_relation` is channel-agnostic,
+    // groups or no channel bound. `grant_on_any_relation` is channel-agnostic,
     // so the "Anyone who linked their Twitch" preset (no channel) must NOT
     // short-circuit here — it matches every linked member.
-    let nobody =
-        !tree.grant_on_any_relation && (broadcaster_id.is_none() || tree.groups.is_empty());
-    if nobody {
+    if !tree.grant_on_any_relation && tree.groups.is_empty() {
         return Ok(Json(
             json!({ "matching": 0, "linked": 0, "available": true }),
         ));
+    }
+    // A follower/subscriber rule with no channel: there is nothing to count
+    // against yet. Say what to do rather than "0 of 0 linked member(s)",
+    // which reads as if nobody had linked.
+    if !tree.grant_on_any_relation && broadcaster_id.is_none() {
+        return Ok(Json(json!({
+            "available": false,
+            "reason": "Connect your Twitch channel to count who matches this rule.",
+        })));
     }
 
     let member_ids = match auth_gateway::fetch_guild_member_ids(
@@ -794,7 +808,7 @@ async fn preview_count_for(
         })));
     }
 
-    // Channel-scoped rule. The `nobody` guard guarantees a channel is bound and
+    // Channel-scoped rule. The guards above guarantee a channel is bound and
     // at least one group exists for this path.
     let broadcaster_id = broadcaster_id.expect("channel bound for non-grant preview");
 

@@ -147,7 +147,7 @@ impl TwitchClient {
 
     /// Refresh a user/broadcaster token. Returns (new_access_token, new_refresh_token).
     pub async fn refresh_token(&self, refresh_token: &str) -> Result<(String, String), AppError> {
-        let resp: TwitchTokenResponse = self
+        let resp = self
             .http
             .post("https://id.twitch.tv/oauth2/token")
             .form(&[
@@ -158,7 +158,24 @@ impl TwitchClient {
             ])
             .send()
             .await
-            .map_err(|e| AppError::TwitchApi(format!("Token refresh failed: {e}")))?
+            .map_err(|e| AppError::TwitchApi(format!("Token refresh failed: {e}")))?;
+
+        // 400 "Invalid refresh token" (or 401) means the grant is gone for good.
+        // Anything else (5xx, a dropped connection above) is worth retrying.
+        let status = resp.status();
+        if status == reqwest::StatusCode::BAD_REQUEST || status == reqwest::StatusCode::UNAUTHORIZED
+        {
+            let body = resp.text().await.unwrap_or_default();
+            return Err(AppError::TwitchTokenRevoked(format!("{status} - {body}")));
+        }
+        if !status.is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            return Err(AppError::TwitchApi(format!(
+                "Token refresh failed: {status} - {body}"
+            )));
+        }
+
+        let resp: TwitchTokenResponse = resp
             .json()
             .await
             .map_err(|e| AppError::TwitchApi(format!("Token refresh parse failed: {e}")))?;

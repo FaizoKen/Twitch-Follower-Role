@@ -72,10 +72,24 @@ pub async fn connect(
     Ok(Redirect::temporary(&url))
 }
 
+/// Twitch's redirect back: `code` + `state` on success, `error=access_denied`
+/// + `state` (no code) when the broadcaster clicks Cancel.
 #[derive(Deserialize)]
 pub struct ConnectCallbackQuery {
-    pub code: String,
-    pub state: String,
+    pub code: Option<String>,
+    pub state: Option<String>,
+    pub error: Option<String>,
+}
+
+const OAUTH_NOT_CONNECTED_TEMPLATE: &str = include_str!("../../templates/oauth_not_connected.html");
+
+/// The new tab's page when no channel was connected: what happened and what
+/// to do, in place of a bare error.
+fn not_connected_page(state: &AppState, status: StatusCode, message: &str) -> Response {
+    let html = OAUTH_NOT_CONNECTED_TEMPLATE
+        .replace("{{BASE_URL}}", &state.config.base_url)
+        .replace("{{MESSAGE}}", message);
+    (status, [("content-type", "text/html; charset=utf-8")], html).into_response()
 }
 
 /// Handle broadcaster OAuth callback.
@@ -84,16 +98,33 @@ pub async fn connect_callback(
     State(state): State<Arc<AppState>>,
     Query(query): Query<ConnectCallbackQuery>,
 ) -> Result<Response, AppError> {
-    // Validate state
-    let oauth_state = sqlx::query_as::<_, (serde_json::Value,)>(
-        "DELETE FROM oauth_states WHERE state = $1 AND expires_at > now() RETURNING redirect_data",
-    )
-    .bind(&query.state)
-    .fetch_optional(&state.pool)
-    .await?
-    .ok_or(AppError::BadRequest(
-        "Invalid or expired OAuth state".into(),
-    ))?;
+    // Validate state (consumed on a cancel too: it is single-use either way).
+    let oauth_state = match query.state.as_deref() {
+        Some(s) => sqlx::query_as::<_, (serde_json::Value,)>(
+            "DELETE FROM oauth_states WHERE state = $1 AND expires_at > now() RETURNING redirect_data",
+        )
+        .bind(s)
+        .fetch_optional(&state.pool)
+        .await?,
+        None => None,
+    };
+    let Some(oauth_state) = oauth_state else {
+        return Ok(not_connected_page(
+            &state,
+            StatusCode::BAD_REQUEST,
+            "This connect link expired or was already used. Go back to the RoleLogic dashboard and click Connect Twitch channel again.",
+        ));
+    };
+    let code = match (query.code.as_deref(), query.error.as_deref()) {
+        (Some(code), None) => code.to_string(),
+        _ => {
+            return Ok(not_connected_page(
+                &state,
+                StatusCode::OK,
+                "You cancelled on Twitch, so nothing changed. Go back to the RoleLogic dashboard and click Connect Twitch channel when you're ready.",
+            ))
+        }
+    };
 
     let data = &oauth_state.0;
     let guild_id = data["guild_id"]
@@ -109,7 +140,7 @@ pub async fn connect_callback(
     let redirect_uri = state.config.broadcaster_oauth_redirect_uri();
     let (access_token, refresh_token) = state
         .twitch_client
-        .exchange_code(&query.code, &redirect_uri)
+        .exchange_code(&code, &redirect_uri)
         .await?;
 
     let refresh_token = refresh_token.ok_or(AppError::TwitchApi(

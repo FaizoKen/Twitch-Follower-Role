@@ -168,14 +168,21 @@ pub async fn run(state: Arc<AppState>) {
                 }
                 Err(e) => {
                     tracing::warn!(broadcaster_id, "Broadcaster token refresh failed: {e}");
-                    sqlx::query(
-                        "UPDATE role_links SET broadcaster_access_token = NULL, broadcaster_refresh_token = NULL \
-                         WHERE broadcaster_id = $1",
-                    )
-                    .bind(broadcaster_id)
-                    .execute(&state.pool)
-                    .await
-                    .ok();
+                    // Only a refresh token Twitch rejected is dead. Dropping the
+                    // tokens on a network or server hiccup used to cut off a
+                    // working channel until its owner reconnected it; now the
+                    // tokens stay and the backoff retries. A dropped token is
+                    // what the role-config page shows as "needs reconnecting".
+                    if matches!(e, crate::error::AppError::TwitchTokenRevoked(_)) {
+                        sqlx::query(
+                            "UPDATE role_links SET broadcaster_access_token = NULL, broadcaster_refresh_token = NULL \
+                             WHERE broadcaster_id = $1",
+                        )
+                        .bind(broadcaster_id)
+                        .execute(&state.pool)
+                        .await
+                        .ok();
+                    }
                     Err(e)
                 }
             }

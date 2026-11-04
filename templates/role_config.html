@@ -51,6 +51,10 @@
   .connectcta { border:1px dashed #3a3a40; border-radius:10px; padding:18px;
     text-align:center; background:#161619; }
   .connectcta p { color:#9aa3b2; margin:4px 0 14px; font-size:13px; }
+  .reconnect { border:1px solid #5c4a1a; border-radius:10px; padding:13px 15px;
+    background:#1f1a0e; }
+  .reconnect p { color:#f5d68a; margin:0 0 12px; font-size:13px; }
+  .reconnect b { color:#fff; }
   .share { background:#1a1726; border:1px solid #34294a; border-radius:10px;
     padding:13px 15px; margin:22px 0; font-size:13px; color:#c3b8d8; }
   .share b { color:#e9deff; }
@@ -195,6 +199,8 @@ function wireCopy(btnId,text){ const b=document.getElementById(btnId); if(!b) re
     setTimeout(()=>b.textContent='Copy link',1500); }); }); }
 
 let state=null, dirty=false, refreshInFlight=false, supPending=false;
+// The footer count, kept across re-renders so it doesn't blank on each click.
+let lastCount='', previewSeq=0, previewTimer=null;
 function setDirty(d){ dirty=d; postDirty(d);
   const s=document.getElementById('save'); if(s) s.disabled=!d; }
 function ruleKey(c){ return JSON.stringify({
@@ -206,6 +212,7 @@ function ruleKey(c){ return JSON.stringify({
 function recomputeDirty(){
   if(!state||!state._edit||!state.config) return;
   setDirty(ruleKey(state._edit)!==ruleKey(state.config));
+  autoPreview(400); // debounced: typing a day count fires this per keystroke
 }
 
 const HELP={ is_follower:"Currently follows the channel.",
@@ -325,7 +332,20 @@ function render(){
 
   let chanBlk='';
   if(showChan){
-    chanBlk = !ch.connected ? `
+    // Connected but Twitch no longer accepts our token (its password changed,
+    // or the app was disconnected on Twitch): nothing updates until the
+    // broadcaster signs in again, so say so instead of "Connected".
+    chanBlk = ch.connected && ch.needs_reconnect ? `
+      <div class="blk"><label>Your Twitch channel</label>
+        <div class="reconnect">
+          <p><b>${esc(ch.broadcaster_login||'')}</b> needs reconnecting. Twitch stopped
+             accepting this connection (a changed password, or access removed on Twitch),
+             so these roles can't update until you sign in again.</p>
+          <div class="row">
+            <button class="primary" id="connect">Reconnect Twitch channel</button>
+            <button id="disconnect" class="danger">Disconnect</button>
+          </div>
+        </div></div>` : !ch.connected ? `
       <div class="blk"><label>Your Twitch channel</label>
         <div class="connectcta">
           <p>Connect the channel we should check follows / subs against.
@@ -357,7 +377,7 @@ function render(){
     </div>
     ${usersBlk}
     <div class="foot">
-      <span class="count" id="count"></span>
+      <span class="count" id="count">${lastCount}</span>
       <div class="foot-btns">
         <button id="preview">Preview</button>
         <button id="save" class="primary" ${dirty?'':'disabled'}>Save</button>
@@ -380,7 +400,7 @@ function render(){
   postHeight();
 }
 
-function choose(id){ state._preset=id; applyPreset(id); render(); }
+function choose(id){ state._preset=id; applyPreset(id); render(); autoPreview(); }
 function applyPreset(id,keepRender){
   const p=presets().find(x=>x.id===id);
   if(id==='custom'){
@@ -496,34 +516,54 @@ async function disconnectChannel(){
   }catch(e){ postToast('Network error: '+e); }
 }
 
-async function doPreview(){
-  const el=document.getElementById('count'); if(!el) return;
-  try{
-    const r=await fetch(`${BASE_URL}/admin/${GUILD_ID}/role/${ROLE_ID}/preview`,
-      {headers:apiHeaders(),credentials:apiCreds(),cache:'no-store'});
-    const d=await r.json();
-    if(!r.ok||d.available===false){ el.textContent=''; return; }
-    el.innerHTML=`<span class="ok">${d.matching}</span> of ${d.linked} linked member(s) match`
-      +(dirty?` · <span style="color:#fbbf24">Save to apply</span>`:``);
-  }catch(_){ el.textContent=''; }
-  postHeight();
+function setCount(html){ lastCount=html; const el=document.getElementById('count');
+  if(el) el.innerHTML=html; postHeight(); }
+function countHtml(d,unsaved){
+  return `<span class="ok">${d.matching}</span> of ${d.linked} linked member(s) match`
+    +(unsaved?` · <span style="color:#fbbf24">Preview of unsaved rule</span>`:``);
 }
-function autoPreview(){ doPreview(); }
+function editPayload(){ const cfg=state._edit;
+  return { grant_on_any_relation:cfg.grant_on_any_relation,
+    groups: cfg.grant_on_any_relation?[]:(cfg.groups||[]) }; }
+// The count always describes the rule on screen: the saved rule's when
+// nothing is unsaved, the edit's (labelled) when something is. It used to
+// show the saved rule's count beside an unsaved choice ("0 of 0 … · Save to
+// apply" on every new link, whose saved rule grants nobody).
+function autoPreview(delay){ clearTimeout(previewTimer);
+  previewTimer=setTimeout(runAutoPreview, delay||0); }
+async function runAutoPreview(){
+  if(!state) return;
+  const seq=++previewSeq, unsaved=dirty;
+  const url=`${BASE_URL}/admin/${GUILD_ID}/role/${ROLE_ID}/preview`;
+  try{
+    const r=unsaved
+      ? await fetch(url,{method:'POST',headers:apiHeaders(),credentials:apiCreds(),body:JSON.stringify(editPayload())})
+      : await fetch(url,{headers:apiHeaders(),credentials:apiCreds(),cache:'no-store'});
+    const d=await r.json().catch(()=>({}));
+    if(seq!==previewSeq) return; // a newer edit already asked
+    if(r.ok&&d.available!==false){ setCount(countHtml(d,unsaved)); return; }
+    // An unfinished rule: say what's missing (the save-time validator's own
+    // words) instead of a count. A rule that needs a channel before it can
+    // count anyone says so. Anything else: no count.
+    if(r.status===400&&d.error) setCount(`<span style="color:#fbbf24">${esc(d.error)}</span>`);
+    else setCount(r.ok&&d.reason?esc(d.reason):'');
+  }catch(_){ if(seq===previewSeq) setCount(''); }
+}
+// Previews the *current* (possibly unsaved) edit.
 async function doPreviewEdit(){
-  const el=document.getElementById('count'); const btn=document.getElementById('preview');
+  const btn=document.getElementById('preview');
   if(!btn) return;
-  const cfg=state._edit;
-  const payload={ grant_on_any_relation:cfg.grant_on_any_relation,
-    groups: cfg.grant_on_any_relation?[]:(cfg.groups||[]) };
+  const payload=editPayload();
   btn.disabled=true; const orig=btn.textContent; btn.textContent='Previewing…';
+  clearTimeout(previewTimer); const seq=++previewSeq; // supersedes any auto preview in flight
   try{
     const r=await fetch(`${BASE_URL}/admin/${GUILD_ID}/role/${ROLE_ID}/preview`,
       {method:'POST',headers:apiHeaders(),credentials:apiCreds(),body:JSON.stringify(payload)});
     const d=await r.json().catch(()=>({}));
+    if(seq!==previewSeq) return;
     if(!r.ok){ postToast(d.error||('Preview failed (HTTP '+r.status+')')); return; }
-    if(d.available===false){ el.textContent=d.reason||'Preview unavailable.'; postHeight(); return; }
-    el.innerHTML=`<span class="ok">${d.matching}</span> of ${d.linked} linked member(s) match`
-      +(dirty?` · <span style="color:#fbbf24">Preview of unsaved rule</span>`:``);
+    if(d.available===false){ setCount(esc(d.reason||'Preview unavailable.')); return; }
+    setCount(countHtml(d,dirty));
   }catch(e){ postToast('Network error: '+e); }
   finally{ btn.disabled=false; btn.textContent=orig; postHeight(); }
 }

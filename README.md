@@ -104,7 +104,32 @@ full DNF builder (OR of AND-groups). A rule matches a member if they satisfy
 
 The **"Anyone who linked their Twitch"** preset is channel-agnostic — it grants
 the role to every member who has linked a Twitch account, no channel required.
-Every other rule needs a connected channel; without one it grants to nobody.
+Every other rule needs a connected channel; without one it grants to nobody,
+and the count under the rule says to connect one instead of showing a number.
+
+The count always describes the rule on screen: the saved rule's when nothing is
+unsaved, the edit's (labelled "Preview of unsaved rule") when something is.
+
+If Twitch stops accepting the channel's connection (the broadcaster changed
+their password, or removed the app on Twitch), the refresh worker drops the
+tokens and the iframe shows the channel as **needs reconnecting** with a
+Reconnect button. Only a refresh token Twitch rejects (400/401) is dropped; a
+network or server error is retried with backoff.
+
+## Timing
+
+- **Follows, new subs and ended subs** arrive through EventSub, so roles change
+  within seconds. Linking also checks the member inline, so their role lands
+  before the page reloads.
+- **Unfollows** have no EventSub event. The refresh worker re-checks every
+  linked member on a schedule: members holding one of this plugin's roles every
+  30 minutes (longer only past ~3,600 linked member–channel pairs), others six
+  times less often. Follow age is re-evaluated on the same re-checks.
+- Members can press **Re-check now** on the verify page (opening it does the
+  same), at most once a minute.
+- Cancelling on Twitch's consent screen, or a Twitch account already linked to
+  another Discord account, sends members back to the verify page with an
+  explanation; a cancelled channel connect shows a "not connected" page.
 
 ## Public users page
 

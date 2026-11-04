@@ -10,6 +10,12 @@ pub enum AppError {
     #[error("Twitch API error: {0}")]
     TwitchApi(String),
 
+    /// Twitch refused a refresh token (400/401): the broadcaster changed their
+    /// password or disconnected the app on Twitch. Unlike a network or server
+    /// hiccup, retrying can't help — only a new sign-in can.
+    #[error("Twitch refresh token rejected: {0}")]
+    TwitchTokenRevoked(String),
+
     #[error("RoleLogic API error: {0}")]
     RoleLogic(String),
 
@@ -63,6 +69,13 @@ impl IntoResponse for AppError {
             AppError::TwitchApi(e) => {
                 tracing::error!("Twitch API error: {e}");
                 (StatusCode::BAD_GATEWAY, "Failed to fetch Twitch data")
+            }
+            AppError::TwitchTokenRevoked(e) => {
+                tracing::warn!("Twitch refresh token rejected: {e}");
+                (
+                    StatusCode::BAD_GATEWAY,
+                    "Twitch access was removed; reconnect the channel",
+                )
             }
             AppError::RoleLogic(e) => {
                 tracing::error!("RoleLogic API error: {e}");

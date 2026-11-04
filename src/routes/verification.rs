@@ -270,7 +270,7 @@ pub fn render_verify_page(base_url: &str) -> String {
         if (!list) return;
         if (!channels.length) {{
             list.innerHTML = '<p style="color:#94a3b8; font-size:13px;">' + (guildId
-                ? "This server hasn't connected its Twitch channel yet. You can still sign in and link below — your role applies once it does."
+                ? "This server hasn't connected a Twitch channel to follow. Sign in and link below — your roles apply as soon as you qualify."
                 : "Open the Twitch channel your server uses and follow (or subscribe to) it, then continue below.") + '</p>';
             return;
         }}
@@ -356,6 +356,26 @@ pub fn render_verify_page(base_url: &str) -> String {
         el.textContent = msg;
         el.classList.remove('hidden');
     }}
+
+    // The Twitch callback sends members back here with ?link=<outcome> when
+    // linking didn't happen, instead of leaving them on a bare error.
+    (function showLinkOutcome() {{
+        const messages = {{
+            cancelled: "Twitch linking was cancelled, so nothing changed. Click Link Twitch Account to try again.",
+            taken: "That Twitch account is already linked to a different Discord account. Unlink it there first, or sign in to Twitch with another account.",
+            expired: "That Twitch sign-in expired or was already used. Click Link Twitch Account to try again.",
+        }};
+        let outcome = '';
+        try {{ outcome = new URLSearchParams(window.location.search).get('link') || ''; }} catch (e) {{}}
+        if (!Object.prototype.hasOwnProperty.call(messages, outcome)) return;
+        showError(messages[outcome]);
+        // Drop it from the address bar so a reload doesn't repeat it.
+        try {{
+            const u = new URL(window.location.href);
+            u.searchParams.delete('link');
+            history.replaceState(null, '', u.pathname + u.search);
+        }} catch (e) {{}}
+    }})();
     loadChannels();
     init();
     </script>
@@ -379,10 +399,25 @@ pub async fn login() -> Result<Redirect, AppError> {
     Ok(Redirect::temporary(&url))
 }
 
+/// Twitch's redirect back. On success it carries `code` + `state`; when the
+/// member clicks Cancel it carries `error=access_denied` + `state` and no code,
+/// so every field is optional — a required `code` turned a cancel into a bare
+/// "Failed to deserialize query string" page.
 #[derive(Deserialize)]
 pub struct CallbackQuery {
-    pub code: String,
-    pub state: String,
+    pub code: Option<String>,
+    pub state: Option<String>,
+    pub error: Option<String>,
+}
+
+/// Back to the verify page with an outcome the page explains (`?link=`),
+/// keeping the per-guild context when there is one.
+fn verify_redirect(guild_id: Option<&str>, outcome: &str) -> Redirect {
+    let url = match guild_id {
+        Some(g) => format!("/twitch-follower-role/verify?guild={g}&link={outcome}"),
+        None => format!("/twitch-follower-role/verify?link={outcome}"),
+    };
+    Redirect::temporary(&url)
 }
 
 pub async fn status(State(state): State<Arc<AppState>>, jar: CookieJar) -> Json<Value> {
@@ -527,22 +562,33 @@ pub async fn twitch_callback(
     jar: CookieJar,
     Query(query): Query<CallbackQuery>,
 ) -> Result<Redirect, AppError> {
-    // Validate state and extract discord_id
-    let oauth_state = sqlx::query_as::<_, (serde_json::Value,)>(
-        "DELETE FROM oauth_states WHERE state = $1 AND expires_at > now() RETURNING redirect_data",
-    )
-    .bind(&query.state)
-    .fetch_optional(&state.pool)
-    .await?
-    .ok_or(AppError::BadRequest(
-        "Invalid or expired OAuth state".into(),
-    ))?;
+    // Validate state and extract discord_id. The state is consumed even on a
+    // cancel, so the page we send the member back to keeps its ?guild=.
+    let oauth_state = match query.state.as_deref() {
+        Some(s) => sqlx::query_as::<_, (serde_json::Value,)>(
+            "DELETE FROM oauth_states WHERE state = $1 AND expires_at > now() RETURNING redirect_data",
+        )
+        .bind(s)
+        .fetch_optional(&state.pool)
+        .await?,
+        None => None,
+    };
+    // Expired (10 minutes), already used, or never ours: start over.
+    let Some(oauth_state) = oauth_state else {
+        return Ok(verify_redirect(None, "expired"));
+    };
 
     let discord_id = oauth_state.0["discord_id"]
         .as_str()
         .ok_or(AppError::Internal("Missing discord_id in state".into()))?
         .to_string();
     let guild_id = oauth_state.0["guild_id"].as_str().map(String::from);
+
+    // Cancel on Twitch's page (error=access_denied), or any other refusal.
+    let code = match (query.code.as_deref(), query.error.as_deref()) {
+        (Some(code), None) => code.to_string(),
+        _ => return Ok(verify_redirect(guild_id.as_deref(), "cancelled")),
+    };
 
     // Opportunistically capture the member's Discord display name from the
     // signed session cookie (for the public users list). Only trust it if the
@@ -557,7 +603,7 @@ pub async fn twitch_callback(
     let redirect_uri = state.config.twitch_user_oauth_redirect_uri();
     let (access_token, _) = state
         .twitch_client
-        .exchange_code(&query.code, &redirect_uri)
+        .exchange_code(&code, &redirect_uri)
         .await?;
 
     // Get Twitch user info
@@ -573,9 +619,8 @@ pub async fn twitch_callback(
 
     if let Some(existing_discord_id) = existing {
         if existing_discord_id != discord_id {
-            return Err(AppError::BadRequest(
-                "This Twitch account is already linked to another Discord user".into(),
-            ));
+            // Shown on the verify page, not as a bare JSON error.
+            return Ok(verify_redirect(guild_id.as_deref(), "taken"));
         }
         // Already linked to this user, update login (+ refresh name if known).
         // COALESCE keeps any previously stored name when the cookie is absent.
