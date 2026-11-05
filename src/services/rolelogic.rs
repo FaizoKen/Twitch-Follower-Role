@@ -41,6 +41,25 @@ fn removal_held(status: reqwest::StatusCode, body: &str) -> bool {
     status == reqwest::StatusCode::CONFLICT && body.contains(RL_CONFIRM_REQUIRED)
 }
 
+/// Pause before each resend of an idempotent request; its length is the
+/// number of resends.
+const RESEND_BACKOFF: [Duration; 2] = [Duration::from_millis(500), Duration::from_secs(2)];
+
+/// A send that failed before RoleLogic answered: the connection was refused
+/// or reset, DNS or TLS failed. Prod 2026-11-02 lost a removal to one of
+/// these ("error sending request for url"), and the request never reached
+/// the API. A timeout is excluded: the request may still be running there,
+/// and the 30 s already spent is the worst case to repeat.
+fn send_failed_transiently(e: &reqwest::Error) -> bool {
+    e.is_request() && !e.is_timeout()
+}
+
+/// An answer from the edge rather than from RoleLogic: Cloudflare or the
+/// tunnel could not reach the API, or it was restarting.
+fn edge_unavailable(status: reqwest::StatusCode) -> bool {
+    matches!(status.as_u16(), 502..=504)
+}
+
 #[derive(Clone)]
 pub struct RoleLogicClient {
     http: reqwest::Client,
@@ -57,6 +76,33 @@ impl RoleLogicClient {
         Self {
             http,
             base_url: "https://api-rolelogic.faizo.net".to_string(),
+        }
+    }
+
+    /// Send a request that is safe to repeat, resending it while the failure
+    /// is the connection's or the edge's rather than RoleLogic's answer. The
+    /// single-user writes qualify: adding a user already on the list answers
+    /// `added: false`, removing one already gone answers `removed: false`.
+    async fn send_idempotent(
+        &self,
+        build: impl Fn() -> reqwest::RequestBuilder,
+    ) -> Result<reqwest::Response, reqwest::Error> {
+        let mut resends = RESEND_BACKOFF.iter();
+        loop {
+            let result = build().send().await;
+            let cause = match &result {
+                Ok(resp) if edge_unavailable(resp.status()) => resp.status().to_string(),
+                Err(e) if send_failed_transiently(e) => e.to_string(),
+                _ => return result,
+            };
+            let Some(&wait) = resends.next() else {
+                return result;
+            };
+            tracing::warn!(
+                wait_ms = wait.as_millis() as u64,
+                "RoleLogic request failed before an answer, resending: {cause}"
+            );
+            tokio::time::sleep(wait).await;
         }
     }
 
@@ -118,10 +164,11 @@ impl RoleLogicClient {
         );
 
         let resp = self
-            .http
-            .post(&url)
-            .header("Authorization", format!("Token {token}"))
-            .send()
+            .send_idempotent(|| {
+                self.http
+                    .post(&url)
+                    .header("Authorization", format!("Token {token}"))
+            })
             .await
             .map_err(|e| AppError::RoleLogic(e.to_string()))?;
 
@@ -171,10 +218,11 @@ impl RoleLogicClient {
         );
 
         let resp = self
-            .http
-            .delete(&url)
-            .header("Authorization", format!("Token {token}"))
-            .send()
+            .send_idempotent(|| {
+                self.http
+                    .delete(&url)
+                    .header("Authorization", format!("Token {token}"))
+            })
             .await
             .map_err(|e| AppError::RoleLogic(e.to_string()))?;
 
@@ -495,5 +543,119 @@ mod tests {
             r#"{"errors":"Upload already in progress"}"#
         ));
         assert!(!removal_held(StatusCode::FORBIDDEN, HELD));
+    }
+
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+    use tokio::net::{TcpListener, TcpStream};
+
+    /// Read one request's head off `sock` (these requests carry no body).
+    async fn read_head(sock: &TcpStream) {
+        let mut head = Vec::new();
+        while !head.windows(4).any(|w| w == b"\r\n\r\n") {
+            sock.readable().await.unwrap();
+            let mut buf = [0u8; 1024];
+            match sock.try_read(&mut buf) {
+                Ok(0) => return,
+                Ok(n) => head.extend_from_slice(&buf[..n]),
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
+                Err(_) => return,
+            }
+        }
+    }
+
+    async fn write_all(sock: &TcpStream, mut bytes: &[u8]) {
+        while !bytes.is_empty() {
+            sock.writable().await.unwrap();
+            match sock.try_write(bytes) {
+                Ok(n) => bytes = &bytes[n..],
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
+                Err(_) => return,
+            }
+        }
+    }
+
+    /// A local server answering the n-th connection with `statuses[n]`, one
+    /// request per connection. Returns its client and how many it served.
+    async fn serve(statuses: Vec<u16>) -> (RoleLogicClient, Arc<AtomicUsize>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        let served = Arc::new(AtomicUsize::new(0));
+        let count = served.clone();
+        tokio::spawn(async move {
+            for status in statuses {
+                let (sock, _) = listener.accept().await.unwrap();
+                read_head(&sock).await;
+                count.fetch_add(1, Ordering::SeqCst);
+                let body = r#"{"data":{"added":true,"removed":true}}"#;
+                let reply = format!(
+                    "HTTP/1.1 {status} Test\r\ncontent-type: application/json\r\n\
+                     content-length: {}\r\nconnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                write_all(&sock, reply.as_bytes()).await;
+            }
+        });
+        let client = RoleLogicClient {
+            http: reqwest::Client::new(),
+            base_url,
+        };
+        (client, served)
+    }
+
+    #[tokio::test]
+    async fn an_edge_failure_is_resent_and_the_answer_used() {
+        let (client, served) = serve(vec![502, 200]).await;
+        let added = client.add_user("g", "r", "u", "t").await.unwrap();
+        assert!(added);
+        assert_eq!(served.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn an_answer_from_rolelogic_is_not_resent() {
+        let (client, served) = serve(vec![400, 200]).await;
+        assert!(client.remove_user("g", "r", "u", "t").await.is_err());
+        assert_eq!(served.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn resending_stops_after_the_last_backoff() {
+        let (client, served) = serve(vec![503, 503, 503, 200]).await;
+        assert!(client.remove_user("g", "r", "u", "t").await.is_err());
+        assert_eq!(served.load(Ordering::SeqCst), 1 + RESEND_BACKOFF.len());
+    }
+
+    #[tokio::test]
+    async fn a_refused_connection_counts_as_transient() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        drop(listener);
+        let err = reqwest::Client::new()
+            .get(format!("http://{addr}"))
+            .send()
+            .await
+            .unwrap_err();
+        assert!(send_failed_transiently(&err), "{err:?}");
+    }
+
+    #[tokio::test]
+    async fn a_timeout_is_not_resent() {
+        // Accepts, then never answers.
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _held = listener.accept().await.unwrap();
+            tokio::time::sleep(Duration::from_secs(30)).await;
+        });
+        let err = reqwest::Client::builder()
+            .timeout(Duration::from_millis(100))
+            .build()
+            .unwrap()
+            .get(format!("http://{addr}"))
+            .send()
+            .await
+            .unwrap_err();
+        assert!(err.is_timeout());
+        assert!(!send_failed_transiently(&err));
     }
 }
