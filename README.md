@@ -116,6 +116,20 @@ tokens and the iframe shows the channel as **needs reconnecting** with a
 Reconnect button. Only a refresh token Twitch rejects (400/401) is dropped; a
 network or server error is retried with backoff.
 
+The owner also sees it without opening the settings: within a minute the
+notice worker puts a **Reconnect needed** notice on the role link in the
+RoleLogic dashboard (`PUT /api/role-link/:guild/:role/notice`), and clears it
+once the channel is connected again. Reconnecting the channel on any one role
+link revives every other link bound to the same channel, since they share one
+connection. A RoleLogic that predates notices answers 404; the worker retries
+hourly.
+
+EventSub subscriptions are reconciled with Twitch every 6 hours, and within 5
+minutes of a revocation: each connected channel keeps exactly one live
+subscription per type, dead, stuck-pending, duplicate and orphaned ones are
+deleted, and missing ones are created. The log line `EventSub reconcile`
+gives the counts.
+
 ## Timing
 
 - **Follows, new subs and ended subs** arrive through EventSub, so roles change
@@ -130,7 +144,13 @@ network or server error is retried with backoff.
   intervals stretch on their own past roughly 2,000 role-holding members or
   10,000 linked member–channel pairs, to stay inside 4 Twitch calls a second.
 - Members can press **Re-check now** on the verify page (opening it does the
-  same), at most once a minute.
+  same), at most once a minute. It also picks up servers they joined after
+  linking, which would otherwise never be checked against that server's
+  channel.
+- Managers can press **Re-check everyone now** in the role's settings: every
+  linked member of the server, plus anyone holding the role, gets a full check,
+  spread at 2 members a second so other servers' 10-minute checks keep their
+  place. Once per 10 minutes per role link.
 - Cancelling on Twitch's consent screen, or a Twitch account already linked to
   another Discord account, sends members back to the verify page with an
   explanation; a cancelled channel connect shows a "not connected" page.

@@ -103,12 +103,14 @@ pub async fn eventsub_handler(
 
             tracing::warn!(sub_id, sub_type, status, "EventSub subscription revoked");
 
-            // Remove from DB
+            // Remove from DB, and ask the reconcile task to replace it soon
+            // (it creates one only while the channel is still connected).
             sqlx::query("DELETE FROM eventsub_subscriptions WHERE id = $1")
                 .bind(sub_id)
                 .execute(&state.pool)
                 .await
                 .ok();
+            state.eventsub_nudge.notify_one();
 
             StatusCode::NO_CONTENT.into_response()
         }

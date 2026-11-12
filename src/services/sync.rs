@@ -500,7 +500,7 @@ pub async fn remove_all_assignments(discord_id: &str, state: &AppState) -> Resul
 
 /// Delete a role_link the RoleLogic API reports as gone (403 Invalid or
 /// revoked token). CASCADE clears role_assignments. Best-effort.
-async fn delete_orphan_role_link(guild_id: &str, role_id: &str, pool: &PgPool) {
+pub(crate) async fn delete_orphan_role_link(guild_id: &str, role_id: &str, pool: &PgPool) {
     tracing::warn!(
         guild_id,
         role_id,
@@ -516,12 +516,16 @@ async fn delete_orphan_role_link(guild_id: &str, role_id: &str, pool: &PgPool) {
     }
 }
 
-/// Populate user_channel_cache rows for a newly linked user across all active broadcasters.
+/// Add a user_channel_cache row for every connected channel in the user's
+/// servers that they don't have one for yet. Runs at link time, and again each
+/// time they open the verify page: a member who joins another server after
+/// linking would otherwise never be checked against that server's channel.
+/// Returns how many rows were added.
 pub async fn populate_cache_for_user(
     discord_id: &str,
     twitch_user_id: &str,
     state: &AppState,
-) -> Result<(), AppError> {
+) -> Result<u64, AppError> {
     let guild_ids = auth_gateway::fetch_user_guild_ids(
         &state.http,
         &state.config.auth_gateway_url,
@@ -531,12 +535,12 @@ pub async fn populate_cache_for_user(
     .await?;
 
     if guild_ids.is_empty() {
-        return Ok(());
+        return Ok(0);
     }
 
-    sqlx::query(
+    let added = sqlx::query(
         "INSERT INTO user_channel_cache (twitch_user_id, broadcaster_id) \
-         SELECT $1, rl.broadcaster_id \
+         SELECT DISTINCT $1, rl.broadcaster_id \
          FROM role_links rl \
          WHERE rl.guild_id = ANY($2) AND rl.broadcaster_id IS NOT NULL \
          ON CONFLICT DO NOTHING",
@@ -544,9 +548,10 @@ pub async fn populate_cache_for_user(
     .bind(twitch_user_id)
     .bind(&guild_ids[..])
     .execute(&state.pool)
-    .await?;
+    .await?
+    .rows_affected();
 
-    Ok(())
+    Ok(added)
 }
 
 /// Populate user_channel_cache rows for all linked users when a broadcaster connects.

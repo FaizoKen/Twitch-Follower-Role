@@ -55,6 +55,11 @@ pub enum AppError {
     #[error("Not found: {0}")]
     NotFound(String),
 
+    /// A service this request depends on did not answer; the message tells
+    /// the caller what to do.
+    #[error("Unavailable: {0}")]
+    Unavailable(String),
+
     #[error("Internal error: {0}")]
     Internal(String),
 }
@@ -102,6 +107,7 @@ impl IntoResponse for AppError {
                 "This configuration changed in another tab. Reload to get the latest, then re-apply.",
             ),
             AppError::NotFound(msg) => (StatusCode::NOT_FOUND, msg.as_str()),
+            AppError::Unavailable(msg) => (StatusCode::SERVICE_UNAVAILABLE, msg.as_str()),
             AppError::Internal(e) => {
                 tracing::error!("Internal error: {e}");
                 (StatusCode::INTERNAL_SERVER_ERROR, "Internal server error")

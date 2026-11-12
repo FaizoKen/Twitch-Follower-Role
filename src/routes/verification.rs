@@ -823,6 +823,25 @@ pub async fn refresh(
 ) -> Result<Json<Value>, AppError> {
     let (discord_id, _) = get_session(&jar, &state.config.session_secret)?;
 
+    // Pick up servers joined since linking first: their channels have no row
+    // yet, so nothing would ever check this member against them. New rows are
+    // due at once. Best-effort: a gateway hiccup still re-checks the rest.
+    let twitch_user_id: Option<String> =
+        sqlx::query_scalar("SELECT twitch_user_id FROM linked_accounts WHERE discord_id = $1")
+            .bind(&discord_id)
+            .fetch_optional(&state.pool)
+            .await?;
+    let added = match &twitch_user_id {
+        Some(tid) => match sync::populate_cache_for_user(&discord_id, tid, &state).await {
+            Ok(n) => n,
+            Err(e) => {
+                tracing::warn!(discord_id, "Could not add new servers before re-check: {e}");
+                0
+            }
+        },
+        None => 0,
+    };
+
     let affected = sqlx::query(
         "UPDATE user_channel_cache ucc SET next_fetch_at = now(), full_fetched_at = NULL \
          FROM linked_accounts la \
@@ -836,5 +855,5 @@ pub async fn refresh(
     .await?
     .rows_affected();
 
-    Ok(Json(json!({ "refreshed": affected > 0 })))
+    Ok(Json(json!({ "refreshed": affected + added > 0 })))
 }

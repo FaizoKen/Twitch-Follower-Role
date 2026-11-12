@@ -60,6 +60,37 @@ fn edge_unavailable(status: reqwest::StatusCode) -> bool {
     matches!(status.as_u16(), 502..=504)
 }
 
+/// What happened to a notice sent to RoleLogic.
+#[derive(Debug, PartialEq, Eq)]
+pub enum NoticeOutcome {
+    /// RoleLogic now shows (or no longer shows) the notice.
+    Applied,
+    /// This RoleLogic predates notices (the route answers 404).
+    Unsupported,
+    /// The link is switched off or paused; every call is refused until the
+    /// owner turns it back on.
+    Inactive,
+    /// The link was deleted in RoleLogic.
+    LinkGone,
+}
+
+/// Classify a notice call's answer. Anything not listed is an error.
+fn notice_outcome(status: reqwest::StatusCode, body: &str) -> Option<NoticeOutcome> {
+    if status.is_success() {
+        return Some(NoticeOutcome::Applied);
+    }
+    if status == reqwest::StatusCode::NOT_FOUND {
+        return Some(NoticeOutcome::Unsupported);
+    }
+    if status == reqwest::StatusCode::FORBIDDEN && body.contains(RL_LINK_GONE_ERROR_MSG) {
+        return Some(NoticeOutcome::LinkGone);
+    }
+    if link_inactive(status, body) {
+        return Some(NoticeOutcome::Inactive);
+    }
+    None
+}
+
 #[derive(Clone)]
 pub struct RoleLogicClient {
     http: reqwest::Client,
@@ -104,6 +135,71 @@ impl RoleLogicClient {
             );
             tokio::time::sleep(wait).await;
         }
+    }
+
+    /// Show a notice on this role link in the RoleLogic dashboard, replacing
+    /// any earlier one. `code` is one RoleLogic knows (`reconnect_required`,
+    /// `action_required`); `message` is shown under it as plain text.
+    pub async fn set_notice(
+        &self,
+        guild_id: &str,
+        role_id: &str,
+        token: &str,
+        code: &str,
+        message: &str,
+    ) -> Result<NoticeOutcome, AppError> {
+        let url = format!(
+            "{}/api/role-link/{}/{}/notice",
+            self.base_url, guild_id, role_id
+        );
+        let body = serde_json::json!({ "code": code, "message": message });
+        let resp = self
+            .send_idempotent(|| {
+                self.http
+                    .put(&url)
+                    .header("Authorization", format!("Token {token}"))
+                    .json(&body)
+            })
+            .await
+            .map_err(|e| AppError::RoleLogic(e.to_string()))?;
+        Self::read_notice_answer(resp, "Set notice").await
+    }
+
+    /// Remove this role link's notice from the RoleLogic dashboard. Clearing
+    /// a link that has none is not an error.
+    pub async fn clear_notice(
+        &self,
+        guild_id: &str,
+        role_id: &str,
+        token: &str,
+    ) -> Result<NoticeOutcome, AppError> {
+        let url = format!(
+            "{}/api/role-link/{}/{}/notice",
+            self.base_url, guild_id, role_id
+        );
+        let resp = self
+            .send_idempotent(|| {
+                self.http
+                    .delete(&url)
+                    .header("Authorization", format!("Token {token}"))
+            })
+            .await
+            .map_err(|e| AppError::RoleLogic(e.to_string()))?;
+        Self::read_notice_answer(resp, "Clear notice").await
+    }
+
+    async fn read_notice_answer(
+        resp: reqwest::Response,
+        what: &str,
+    ) -> Result<NoticeOutcome, AppError> {
+        let status = resp.status();
+        let body = if status.is_success() {
+            String::new()
+        } else {
+            resp.text().await.unwrap_or_default()
+        };
+        notice_outcome(status, &body)
+            .ok_or_else(|| AppError::RoleLogic(format!("{what} failed: {status} - {body}")))
     }
 
     /// Get user count and limit for a role link.
@@ -543,6 +639,33 @@ mod tests {
             r#"{"errors":"Upload already in progress"}"#
         ));
         assert!(!removal_held(StatusCode::FORBIDDEN, HELD));
+    }
+
+    #[test]
+    fn notice_answers_are_classified() {
+        assert_eq!(
+            notice_outcome(StatusCode::OK, ""),
+            Some(NoticeOutcome::Applied)
+        );
+        // An API from before notices existed: retry later, not an error.
+        assert_eq!(
+            notice_outcome(StatusCode::NOT_FOUND, r#"{"message":"Cannot PUT"}"#),
+            Some(NoticeOutcome::Unsupported)
+        );
+        assert_eq!(
+            notice_outcome(StatusCode::FORBIDDEN, GONE),
+            Some(NoticeOutcome::LinkGone)
+        );
+        assert_eq!(
+            notice_outcome(StatusCode::FORBIDDEN, DISABLED),
+            Some(NoticeOutcome::Inactive)
+        );
+        assert_eq!(
+            notice_outcome(StatusCode::FORBIDDEN, PAUSED),
+            Some(NoticeOutcome::Inactive)
+        );
+        assert_eq!(notice_outcome(StatusCode::BAD_REQUEST, "{}"), None);
+        assert_eq!(notice_outcome(StatusCode::INTERNAL_SERVER_ERROR, ""), None);
     }
 
     use std::sync::atomic::{AtomicUsize, Ordering};

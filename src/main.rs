@@ -32,6 +32,8 @@ pub struct AppState {
     pub rl_client: RoleLogicClient,
     pub http: reqwest::Client,
     pub verify_html: bytes::Bytes,
+    /// Asks the EventSub reconcile task for an early run (after a revocation).
+    pub eventsub_nudge: tokio::sync::Notify,
 }
 
 #[tokio::main]
@@ -78,6 +80,7 @@ async fn main() {
         rl_client,
         http,
         verify_html,
+        eventsub_nudge: tokio::sync::Notify::new(),
     });
 
     // Spawn background workers
@@ -91,6 +94,8 @@ async fn main() {
         Arc::clone(&state),
     ));
     tokio::spawn(tasks::cleanup_expired(Arc::clone(&state)));
+    tokio::spawn(tasks::eventsub_reconcile::run(Arc::clone(&state)));
+    tokio::spawn(tasks::notice_worker::run(Arc::clone(&state)));
 
     // CORS: explicit allowlist (this plugin's origin + the RoleLogic dashboard
     // that embeds the iframe). `allow_credentials(true)` requires explicit
@@ -142,6 +147,10 @@ async fn main() {
                 .route(
                     "/admin/{guild_id}/role/{role_id}/disconnect",
                     post(routes::admin::broadcaster_disconnect),
+                )
+                .route(
+                    "/admin/{guild_id}/role/{role_id}/recheck",
+                    post(routes::admin::recheck_members),
                 )
                 // Per-guild settings + public linked-users list
                 .route(

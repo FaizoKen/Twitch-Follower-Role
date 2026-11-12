@@ -1,4 +1,6 @@
 pub mod config_sync_worker;
+pub mod eventsub_reconcile;
+pub mod notice_worker;
 pub mod refresh_worker;
 pub mod user_sync_worker;
 

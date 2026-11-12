@@ -173,6 +173,186 @@ pub async fn broadcaster_disconnect(
 }
 
 // ---------------------------------------------------------------------
+// POST /admin/{guild_id}/role/{role_id}/recheck
+// Ask Twitch again about every linked member of this server, now.
+// ---------------------------------------------------------------------
+
+/// How often one link can queue a re-check of its whole server.
+const RECHECK_COOLDOWN_SECS: i64 = 600;
+/// Queued re-checks are spread at this many members a second, so a big
+/// server shares the refresh worker with everyone else's 10-minute follow
+/// checks instead of queueing in front of them. Two members is at most four
+/// Twitch calls a second.
+const RECHECK_ROWS_PER_SEC: f64 = 2.0;
+
+/// Seconds until a link may queue another re-check, from SQL. `$1` is the
+/// cooldown in seconds.
+const RECHECK_WAIT_SQL: &str =
+    "COALESCE(GREATEST(0, $1 - EXTRACT(EPOCH FROM now() - recheck_requested_at))::bigint, 0)";
+
+/// Rough time for the refresh worker to get through `queued` re-checks.
+fn recheck_eta_secs(queued: u64) -> i64 {
+    (queued as f64 / RECHECK_ROWS_PER_SEC).ceil() as i64 + 15
+}
+
+pub async fn recheck_members(
+    State(state): State<Arc<AppState>>,
+    Path((guild_id, role_id)): Path<(String, String)>,
+    jar: CookieJar,
+    headers: HeaderMap,
+) -> Result<Json<Value>, AppError> {
+    if extract_bearer(&headers).is_none() {
+        csrf::verify_origin(&headers, &state.config.allowed_origins)?;
+    }
+    let access = require_role_config_access(&state, &jar, &headers, &guild_id, &role_id).await?;
+    if access.read_only {
+        return Err(AppError::Forbidden(
+            "This configuration is read-only while impersonating a user.".into(),
+        ));
+    }
+
+    let (broadcaster_id, has_token, wait) = sqlx::query_as::<_, (Option<String>, bool, i64)>(
+        &format!(
+            "SELECT broadcaster_id, broadcaster_access_token IS NOT NULL, {RECHECK_WAIT_SQL} \
+             FROM role_links WHERE guild_id = $2 AND role_id = $3"
+        ),
+    )
+    .bind(RECHECK_COOLDOWN_SECS)
+    .bind(&guild_id)
+    .bind(&role_id)
+    .fetch_optional(&state.pool)
+    .await?
+    .ok_or_else(|| {
+        AppError::NotFound("This role link doesn't exist. Has it been added in RoleLogic?".into())
+    })?;
+
+    let Some(broadcaster_id) = broadcaster_id else {
+        return Err(AppError::BadRequest(
+            "Connect a Twitch channel first.".into(),
+        ));
+    };
+    if !has_token {
+        return Err(AppError::BadRequest(
+            "Reconnect the Twitch channel first: Twitch isn't accepting this connection, \
+             so there is nothing to check against."
+                .into(),
+        ));
+    }
+    if wait > 0 {
+        return Ok(Json(json!({ "queued": 0, "retry_in_secs": wait })));
+    }
+
+    // Claim the cooldown before the slow part, so two clicks can't both run.
+    let claimed: Option<chrono::DateTime<chrono::Utc>> = sqlx::query_scalar(
+        "UPDATE role_links SET recheck_requested_at = now() \
+         WHERE guild_id = $1 AND role_id = $2 \
+           AND (recheck_requested_at IS NULL \
+                OR recheck_requested_at <= now() - make_interval(secs => $3)) \
+         RETURNING recheck_requested_at",
+    )
+    .bind(&guild_id)
+    .bind(&role_id)
+    .bind(RECHECK_COOLDOWN_SECS as f64)
+    .fetch_optional(&state.pool)
+    .await?;
+    let Some(claimed_at) = claimed else {
+        return Ok(Json(
+            json!({ "queued": 0, "retry_in_secs": RECHECK_COOLDOWN_SECS }),
+        ));
+    };
+
+    let members = match auth_gateway::fetch_guild_member_ids(
+        &state.http,
+        &state.config.auth_gateway_url,
+        &state.config.internal_api_key,
+        &guild_id,
+    )
+    .await
+    {
+        Ok(m) => m,
+        Err(e) => {
+            tracing::warn!(guild_id, role_id, "Re-check could not list members: {e}");
+            // Nothing was queued, so the click should not cost a cooldown.
+            sqlx::query(
+                "UPDATE role_links SET recheck_requested_at = NULL \
+                 WHERE guild_id = $1 AND role_id = $2 AND recheck_requested_at = $3",
+            )
+            .bind(&guild_id)
+            .bind(&role_id)
+            .bind(claimed_at)
+            .execute(&state.pool)
+            .await
+            .ok();
+            return Err(AppError::Unavailable(
+                "Couldn't load this server's members right now. Try again in a minute.".into(),
+            ));
+        }
+    };
+
+    // Who to check: linked members of the server, plus anyone holding this
+    // role (they may have left the server, and should lose it if they no
+    // longer qualify). A member with no row for this channel (they joined the
+    // server after linking) gets one, or nothing would ever check them.
+    let in_scope = "(la.discord_id = ANY($2::text[]) \
+                     OR EXISTS (SELECT 1 FROM role_assignments ra \
+                                WHERE ra.guild_id = $3 AND ra.role_id = $4 \
+                                  AND ra.discord_id = la.discord_id))";
+    let added = sqlx::query(&format!(
+        "INSERT INTO user_channel_cache (twitch_user_id, broadcaster_id) \
+         SELECT la.twitch_user_id, $1 FROM linked_accounts la WHERE {in_scope} \
+         ON CONFLICT DO NOTHING"
+    ))
+    .bind(&broadcaster_id)
+    .bind(&members)
+    .bind(&guild_id)
+    .bind(&role_id)
+    .execute(&state.pool)
+    .await?
+    .rows_affected();
+
+    // Due in order, spread over time; each is a full check, which re-syncs
+    // the member's roles whatever it finds. A member fully checked in the
+    // last minute is skipped.
+    let queued = sqlx::query(&format!(
+        "WITH target AS ( \
+           SELECT ucc.twitch_user_id, \
+                  row_number() OVER (ORDER BY ucc.full_fetched_at ASC NULLS FIRST, \
+                                              ucc.twitch_user_id) AS rn \
+           FROM user_channel_cache ucc \
+           JOIN linked_accounts la ON la.twitch_user_id = ucc.twitch_user_id \
+           WHERE ucc.broadcaster_id = $1 AND {in_scope} \
+             AND (ucc.full_fetched_at IS NULL \
+                  OR ucc.full_fetched_at < now() - interval '60 seconds')) \
+         UPDATE user_channel_cache u SET \
+           next_fetch_at = now() + make_interval(secs => (target.rn - 1) / $5), \
+           full_fetched_at = NULL, fetch_failures = 0 \
+         FROM target \
+         WHERE u.twitch_user_id = target.twitch_user_id AND u.broadcaster_id = $1"
+    ))
+    .bind(&broadcaster_id)
+    .bind(&members)
+    .bind(&guild_id)
+    .bind(&role_id)
+    .bind(RECHECK_ROWS_PER_SEC)
+    .execute(&state.pool)
+    .await?
+    .rows_affected();
+
+    tracing::info!(
+        guild_id,
+        role_id,
+        queued,
+        added,
+        "Manager queued a re-check of the server"
+    );
+    Ok(Json(json!({
+        "queued": queued,
+        "eta_secs": recheck_eta_secs(queued),
+        "retry_in_secs": RECHECK_COOLDOWN_SECS,
+    })))
+}
+
+// ---------------------------------------------------------------------
 // GET /admin/{guild_id}/role/{role_id}  — the iframe rule-builder page
 // ---------------------------------------------------------------------
 
@@ -511,11 +691,14 @@ pub async fn role_config_data(
     // Twitch rejects its refresh token (password changed, app disconnected on
     // Twitch). The channel is still bound, but nothing can be read from it
     // until the broadcaster signs in again.
-    let link = sqlx::query_as::<_, (Option<String>, Option<String>, Value, i32, bool)>(
-        "SELECT broadcaster_id, broadcaster_login, rule_tree, rule_tree_version, \
-                broadcaster_access_token IS NULL \
-         FROM role_links WHERE guild_id = $1 AND role_id = $2",
+    let link = sqlx::query_as::<_, (Option<String>, Option<String>, Value, i32, bool, i64)>(
+        &format!(
+            "SELECT broadcaster_id, broadcaster_login, rule_tree, rule_tree_version, \
+                    broadcaster_access_token IS NULL, {RECHECK_WAIT_SQL} \
+             FROM role_links WHERE guild_id = $2 AND role_id = $3"
+        ),
     )
+    .bind(RECHECK_COOLDOWN_SECS)
     .bind(&guild_id)
     .bind(&role_id)
     .fetch_optional(&state.pool)
@@ -523,7 +706,14 @@ pub async fn role_config_data(
     .ok_or_else(|| {
         AppError::NotFound("This role link doesn't exist. Has it been added in RoleLogic?".into())
     })?;
-    let (broadcaster_id, broadcaster_login, rule_tree, rule_tree_version, token_missing) = link;
+    let (
+        broadcaster_id,
+        broadcaster_login,
+        rule_tree,
+        rule_tree_version,
+        token_missing,
+        recheck_wait,
+    ) = link;
     let needs_reconnect = broadcaster_id.is_some() && token_missing;
     let tree: RuleTree = serde_json::from_value(rule_tree).unwrap_or_default();
 
@@ -552,6 +742,7 @@ pub async fn role_config_data(
             "needs_reconnect": needs_reconnect,
             "broadcaster_id": broadcaster_id,
             "broadcaster_login": broadcaster_login,
+            "recheck_retry_in_secs": recheck_wait,
         },
         "targets": target_catalog(),
         "operators": operator_catalog(),

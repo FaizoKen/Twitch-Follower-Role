@@ -9,6 +9,7 @@ use serde_json::json;
 
 use crate::error::AppError;
 use crate::services::sync::{self, ConfigSyncEvent};
+use crate::services::twitch::CreateSubscription;
 use crate::AppState;
 
 const OAUTH_DONE_TEMPLATE: &str = include_str!("../../templates/oauth_done.html");
@@ -167,11 +168,33 @@ pub async fn connect_callback(
     .execute(&state.pool)
     .await?;
 
+    // The same channel bound to other role links shares one connection: the
+    // refresh worker writes a refreshed token to every link of the channel,
+    // and drops it from every link when Twitch rejects it. Signing in again
+    // here therefore revives those links too, instead of leaving them saying
+    // "needs reconnecting" until each one is reconnected separately.
+    let revived = sqlx::query(
+        "UPDATE role_links SET \
+         broadcaster_login = $1, broadcaster_access_token = $2, broadcaster_refresh_token = $3 \
+         WHERE broadcaster_id = $4 AND broadcaster_access_token IS NULL \
+           AND NOT (guild_id = $5 AND role_id = $6)",
+    )
+    .bind(&broadcaster.login)
+    .bind(&access_token)
+    .bind(&refresh_token)
+    .bind(&broadcaster.id)
+    .bind(&guild_id)
+    .bind(&role_id)
+    .execute(&state.pool)
+    .await?
+    .rows_affected();
+
     tracing::info!(
         guild_id,
         role_id,
         broadcaster_id = broadcaster.id,
         broadcaster_login = broadcaster.login,
+        revived_links = revived,
         "Broadcaster connected"
     );
 
@@ -266,36 +289,43 @@ pub(crate) async fn cleanup_broadcaster_if_orphaned(state: &AppState, broadcaste
         .ok();
 }
 
+/// The EventSub types every connected channel is subscribed to, with their
+/// versions. The reconcile task holds Twitch to exactly this set.
+pub(crate) const EVENTSUB_TYPES: [(&str, &str); 3] = [
+    ("channel.follow", "2"),
+    ("channel.subscribe", "1"),
+    ("channel.subscription.end", "1"),
+];
+
+/// The condition Twitch expects for one of [`EVENTSUB_TYPES`]. A follow
+/// subscription reads the follower list as a moderator of the channel; the
+/// broadcaster is their own channel's moderator.
+pub(crate) fn eventsub_condition(event_type: &str, broadcaster_id: &str) -> serde_json::Value {
+    if event_type == "channel.follow" {
+        json!({
+            "broadcaster_user_id": broadcaster_id,
+            "moderator_user_id": broadcaster_id
+        })
+    } else {
+        json!({ "broadcaster_user_id": broadcaster_id })
+    }
+}
+
+/// Where Twitch delivers this plugin's EventSub notifications.
+pub(crate) fn eventsub_callback_url(state: &AppState) -> String {
+    format!("{}/webhooks/twitch", state.config.base_url)
+}
+
 /// Create EventSub webhook subscriptions for a broadcaster.
 async fn create_eventsub_subscriptions(
     state: &AppState,
     broadcaster_id: &str,
 ) -> Result<(), AppError> {
     let app_token = state.twitch_client.get_app_access_token().await?;
-    let callback_url = format!("{}/webhooks/twitch", state.config.base_url);
+    let callback_url = eventsub_callback_url(state);
 
-    let subscriptions = [
-        (
-            "channel.follow",
-            "2",
-            json!({
-                "broadcaster_user_id": broadcaster_id,
-                "moderator_user_id": broadcaster_id
-            }),
-        ),
-        (
-            "channel.subscribe",
-            "1",
-            json!({ "broadcaster_user_id": broadcaster_id }),
-        ),
-        (
-            "channel.subscription.end",
-            "1",
-            json!({ "broadcaster_user_id": broadcaster_id }),
-        ),
-    ];
-
-    for (event_type, version, condition) in subscriptions {
+    for (event_type, version) in EVENTSUB_TYPES {
+        let condition = eventsub_condition(event_type, broadcaster_id);
         // Skip if already exists
         let exists = sqlx::query_scalar::<_, bool>(
             "SELECT EXISTS(SELECT 1 FROM eventsub_subscriptions WHERE broadcaster_id = $1 AND event_type = $2)",
@@ -315,7 +345,16 @@ async fn create_eventsub_subscriptions(
             .create_eventsub_subscription(event_type, version, condition, &callback_url, &app_token)
             .await
         {
-            Ok(sub) => {
+            // Twitch already has one; the reconcile task records it.
+            Ok(CreateSubscription::AlreadyExists) => {}
+            Ok(CreateSubscription::NotAuthorized) => {
+                tracing::warn!(
+                    broadcaster_id,
+                    event_type,
+                    "EventSub subscription refused: the broadcaster's grant lacks the scope"
+                );
+            }
+            Ok(CreateSubscription::Created(sub)) => {
                 sqlx::query(
                     "INSERT INTO eventsub_subscriptions (id, broadcaster_id, event_type, status) \
                      VALUES ($1, $2, $3, $4) ON CONFLICT (broadcaster_id, event_type) DO UPDATE SET id = $1, status = $4",

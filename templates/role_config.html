@@ -55,6 +55,8 @@
     background:#1f1a0e; }
   .reconnect p { color:#f5d68a; margin:0 0 12px; font-size:13px; }
   .reconnect b { color:#fff; }
+  .recheck { display:flex; align-items:center; gap:10px; flex-wrap:wrap; margin-top:10px; }
+  .recheck .note { color:#9aa3b2; font-size:12px; flex:1; min-width:200px; }
   .share { background:#1a1726; border:1px solid #34294a; border-radius:10px;
     padding:13px 15px; margin:22px 0; font-size:13px; color:#c3b8d8; }
   .share b { color:#e9deff; }
@@ -359,6 +361,10 @@ function render(){
           </div>
           <button id="connect">Connect a different channel</button>
           <button id="disconnect" class="danger">Disconnect</button>
+        </div>
+        <div class="recheck">
+          <button id="recheck" ${(ch.recheck_retry_in_secs||0)>0?'disabled':''}>Re-check everyone now</button>
+          <span class="note" id="recheck-note">${esc(state._recheckMsg||recheckNoteFor(ch.recheck_retry_in_secs||0))}</span>
         </div></div>`;
   }
 
@@ -387,6 +393,7 @@ function render(){
   app.querySelectorAll('input[name=who]').forEach(r=>r.addEventListener('change',()=>choose(r.value)));
   const cc=document.getElementById('connect'); if(cc) cc.addEventListener('click',connectChannel);
   const dc=document.getElementById('disconnect'); if(dc) dc.addEventListener('click',disconnectChannel);
+  const rc=document.getElementById('recheck'); if(rc) rc.addEventListener('click',recheckMembers);
   wireCopy('copy', verifyUrl);
   wireCopy('copysup', sup.url);
   app.querySelectorAll('input[name=vp]').forEach(r=>r.addEventListener('change',()=>setViewPerm(r.value)));
@@ -516,6 +523,34 @@ async function disconnectChannel(){
   }catch(e){ postToast('Network error: '+e); }
 }
 
+function recheckNoteFor(wait){
+  return wait>0
+    ? `Re-checked recently. You can run it again in ${Math.ceil(wait/60)} min.`
+    : 'Asks Twitch again about every linked member of this server. Unfollows already come off on their own within about 10 minutes.';
+}
+async function recheckMembers(){
+  const b=document.getElementById('recheck'), n=document.getElementById('recheck-note');
+  if(b) b.disabled=true;
+  try{
+    const r=await fetch(`${BASE_URL}/admin/${GUILD_ID}/role/${ROLE_ID}/recheck`,
+      {method:'POST',headers:apiHeaders(),credentials:apiCreds()});
+    const d=await r.json().catch(()=>({}));
+    if(!r.ok){ postToast(d.error||'Could not start the re-check.'); if(b) b.disabled=false; return; }
+    if(state.channel) state.channel.recheck_retry_in_secs=d.retry_in_secs||0;
+    let msg;
+    if(d.queued>0){
+      const mins=Math.max(1,Math.round((d.eta_secs||0)/60));
+      msg=`Re-checking ${d.queued} member${d.queued===1?'':'s'} on Twitch, done in about ${mins} min. Roles update as each check finishes.`;
+    } else if(d.eta_secs!==undefined){
+      msg='Everyone here was checked in the last minute, so there was nothing to re-check.';
+    } else {
+      msg=recheckNoteFor(d.retry_in_secs||0);
+    }
+    state._recheckMsg=msg;
+    if(n) n.textContent=msg;
+    postHeight();
+  }catch(e){ postToast('Network error: '+e); if(b) b.disabled=false; }
+}
 function setCount(html){ lastCount=html; const el=document.getElementById('count');
   if(el) el.innerHTML=html; postHeight(); }
 function countHtml(d,unsaved){
@@ -598,7 +633,10 @@ async function refreshFromServer(){
     const r=await fetch(`${BASE_URL}/admin/${GUILD_ID}/role/${ROLE_ID}/data`,
       {headers:apiHeaders(),credentials:apiCreds(),cache:'no-store'});
     if(r.ok){ const d=await r.json();
-      const chCh=JSON.stringify(d.channel)!==JSON.stringify(state.channel);
+      // The re-check countdown changes on every fetch; it alone is no reason
+      // to re-render, so compare the channel without it.
+      const chKey=c=>JSON.stringify(Object.assign({},c||{},{recheck_retry_in_secs:0}));
+      const chCh=chKey(d.channel)!==chKey(state.channel);
       const cfgCh=JSON.stringify(d.config)!==JSON.stringify(state.config);
       const supCh=JSON.stringify(d.users)!==JSON.stringify(state.users);
       if(chCh) state.channel=d.channel;

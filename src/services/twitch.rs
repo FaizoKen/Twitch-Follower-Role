@@ -57,6 +57,78 @@ pub struct EventSubSubscription {
     pub status: String,
 }
 
+/// What a create call came back with.
+#[derive(Debug)]
+pub enum CreateSubscription {
+    Created(EventSubSubscription),
+    /// 409: an enabled or pending one with this type, condition and callback
+    /// already exists.
+    AlreadyExists,
+    /// 403: the broadcaster has not granted this app the scope the type needs
+    /// (or took the grant back).
+    NotAuthorized,
+}
+
+/// One subscription as Twitch lists it.
+#[derive(Debug, Clone)]
+pub struct ListedSubscription {
+    pub id: String,
+    pub status: String,
+    pub event_type: String,
+    pub version: String,
+    pub broadcaster_id: Option<String>,
+    pub callback: Option<String>,
+    pub created_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct ListPage {
+    data: Vec<ListedRaw>,
+    #[serde(default)]
+    pagination: Pagination,
+}
+
+#[derive(Debug, Default, serde::Deserialize)]
+struct Pagination {
+    cursor: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct ListedRaw {
+    id: String,
+    status: String,
+    #[serde(rename = "type")]
+    event_type: String,
+    version: String,
+    #[serde(default)]
+    condition: serde_json::Value,
+    #[serde(default)]
+    transport: serde_json::Value,
+    created_at: Option<String>,
+}
+
+/// More pages than this means something is wrong (Twitch caps a client's
+/// subscriptions far below it); stop rather than loop.
+const MAX_LIST_PAGES: usize = 500;
+
+fn listed_from_raw(raw: ListedRaw) -> ListedSubscription {
+    ListedSubscription {
+        id: raw.id,
+        status: raw.status,
+        event_type: raw.event_type,
+        version: raw.version,
+        broadcaster_id: raw.condition["broadcaster_user_id"]
+            .as_str()
+            .map(str::to_owned),
+        callback: raw.transport["callback"].as_str().map(str::to_owned),
+        created_at: raw
+            .created_at
+            .as_deref()
+            .and_then(|t| chrono::DateTime::parse_from_rfc3339(t).ok())
+            .map(|t| t.with_timezone(&chrono::Utc)),
+    }
+}
+
 pub struct TwitchClient {
     http: reqwest::Client,
     pub client_id: String,
@@ -320,7 +392,7 @@ impl TwitchClient {
         condition: serde_json::Value,
         callback_url: &str,
         app_token: &str,
-    ) -> Result<EventSubSubscription, AppError> {
+    ) -> Result<CreateSubscription, AppError> {
         let body = serde_json::json!({
             "type": event_type,
             "version": version,
@@ -345,7 +417,13 @@ impl TwitchClient {
             })?;
 
         let status = resp.status();
-        if !status.is_success() && status != reqwest::StatusCode::ACCEPTED {
+        if status == reqwest::StatusCode::CONFLICT {
+            return Ok(CreateSubscription::AlreadyExists);
+        }
+        if status == reqwest::StatusCode::FORBIDDEN {
+            return Ok(CreateSubscription::NotAuthorized);
+        }
+        if !status.is_success() {
             let body = resp.text().await.unwrap_or_default();
             return Err(AppError::TwitchApi(format!(
                 "Create EventSub subscription failed: {status} - {body}"
@@ -360,7 +438,52 @@ impl TwitchClient {
         data.data
             .into_iter()
             .next()
+            .map(CreateSubscription::Created)
             .ok_or_else(|| AppError::TwitchApi("No subscription data returned".into()))
+    }
+
+    /// Every subscription this client created, all pages. Twitch decides the
+    /// page size. Each page waits for the rate limiter.
+    pub async fn list_eventsub_subscriptions(
+        &self,
+        app_token: &str,
+    ) -> Result<Vec<ListedSubscription>, AppError> {
+        let mut out = Vec::new();
+        let mut cursor: Option<String> = None;
+        for _ in 0..MAX_LIST_PAGES {
+            self.wait_for_permit().await;
+            let mut req = self
+                .http
+                .get("https://api.twitch.tv/helix/eventsub/subscriptions")
+                .header("Authorization", format!("Bearer {app_token}"))
+                .header("Client-Id", &self.client_id);
+            if let Some(c) = &cursor {
+                req = req.query(&[("after", c.as_str())]);
+            }
+            let resp = req
+                .send()
+                .await
+                .map_err(|e| AppError::TwitchApi(format!("List EventSub failed: {e}")))?;
+            let status = resp.status();
+            if !status.is_success() {
+                let body = resp.text().await.unwrap_or_default();
+                return Err(AppError::TwitchApi(format!(
+                    "List EventSub failed: {status} - {body}"
+                )));
+            }
+            let page: ListPage = resp
+                .json()
+                .await
+                .map_err(|e| AppError::TwitchApi(format!("List EventSub parse failed: {e}")))?;
+            out.extend(page.data.into_iter().map(listed_from_raw));
+            match page.pagination.cursor.filter(|c| !c.is_empty()) {
+                Some(next) => cursor = Some(next),
+                None => return Ok(out),
+            }
+        }
+        Err(AppError::TwitchApi(format!(
+            "List EventSub stopped after {MAX_LIST_PAGES} pages"
+        )))
     }
 
     /// Delete an EventSub subscription by ID.
