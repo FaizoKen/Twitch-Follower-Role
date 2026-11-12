@@ -68,30 +68,46 @@ pub async fn sync_for_user(discord_id: &str, state: &AppState) -> Result<(), App
         return Ok(());
     };
 
-    let guild_ids = auth_gateway::fetch_user_guild_ids(
+    // The servers the Auth Gateway lists for this member. A server is missing
+    // from the list when they left it, when they paused the plugin there
+    // (the gateway also pauses a newly seen server on its own), or when the
+    // gateway has lost track of them. Granting needs the list: a role is only
+    // given in a server the member is known to be in.
+    //
+    // Taking a role away does not. The assignment is ours, so the link is
+    // known without asking, and "no longer meets the rule" is true wherever
+    // the member is. Limiting removals to listed servers left a member who
+    // unfollowed holding the role for good once their server dropped off the
+    // list. So a failed lookup stops the grants and nothing else; it is
+    // returned once the removals are done.
+    let guild_lookup = auth_gateway::fetch_user_guild_ids(
         &state.http,
         &state.config.auth_gateway_url,
         &state.config.internal_api_key,
         discord_id,
     )
-    .await?;
+    .await;
+    let guild_ids: &[String] = guild_lookup.as_deref().unwrap_or(&[]);
 
-    if guild_ids.is_empty() {
-        return Ok(());
-    }
-
-    // All role links in the user's guilds. No broadcaster filter — a
-    // `grant_on_any_relation` link needs no channel.
+    // Role links in the member's listed servers, plus every link they already
+    // hold a role on. No broadcaster filter — a `grant_on_any_relation` link
+    // needs no channel. A link outside the listed servers is here only because
+    // it is assigned, so the loop below can remove on it and never add.
     let role_links = sqlx::query_as::<_, (String, String, String, Value, Option<String>)>(
         "SELECT rl.guild_id, rl.role_id, rl.api_token, rl.rule_tree, rl.broadcaster_id \
-         FROM role_links rl WHERE rl.guild_id = ANY($1)",
+         FROM role_links rl \
+         WHERE rl.guild_id = ANY($1) \
+            OR EXISTS (SELECT 1 FROM role_assignments ra \
+                       WHERE ra.guild_id = rl.guild_id AND ra.role_id = rl.role_id \
+                         AND ra.discord_id = $2)",
     )
-    .bind(&guild_ids[..])
+    .bind(guild_ids)
+    .bind(discord_id)
     .fetch_all(pool)
     .await?;
 
     if role_links.is_empty() {
-        return Ok(());
+        return guild_lookup.map(|_| ());
     }
 
     // Cached (broadcaster_id → facts) for this user across all channels.
@@ -173,7 +189,7 @@ pub async fn sync_for_user(discord_id: &str, state: &AppState) -> Result<(), App
     }
 
     if actions.is_empty() {
-        return Ok(());
+        return guild_lookup.map(|_| ());
     }
 
     let discord_id_owned = discord_id.to_string();
@@ -269,7 +285,7 @@ pub async fn sync_for_user(discord_id: &str, state: &AppState) -> Result<(), App
         })
         .await;
 
-    Ok(())
+    guild_lookup.map(|_| ())
 }
 
 /// Re-evaluate all users for a specific role link (after config change).
