@@ -116,6 +116,30 @@ pub async fn eventsub_handler(
     }
 }
 
+/// The Discord account a Twitch user is linked to, if any.
+///
+/// Every handler asks this first. EventSub reports every follower and
+/// subscriber of a connected channel, and nearly all of them never linked: a
+/// cache row for one of those is read by nothing, and the table once held
+/// fourteen such rows for each real one.
+async fn linked_discord_id(twitch_user_id: &str, state: &AppState) -> Option<String> {
+    sqlx::query_scalar::<_, String>(
+        "SELECT discord_id FROM linked_accounts WHERE twitch_user_id = $1",
+    )
+    .bind(twitch_user_id)
+    .fetch_optional(&state.pool)
+    .await
+    .ok()
+    .flatten()
+}
+
+async fn send_sync(discord_id: String, state: &AppState) {
+    let _ = state
+        .user_sync_tx
+        .send(UserSyncEvent::UserUpdated { discord_id })
+        .await;
+}
+
 async fn handle_follow(event: &serde_json::Value, state: &AppState) {
     let user_id = match event["user_id"].as_str() {
         Some(id) => id,
@@ -125,28 +149,31 @@ async fn handle_follow(event: &serde_json::Value, state: &AppState) {
         Some(id) => id,
         None => return,
     };
+    let Some(discord_id) = linked_discord_id(user_id, state).await else {
+        return;
+    };
     let followed_at = event["followed_at"].as_str().unwrap_or("");
 
     let followed_at_ts = chrono::DateTime::parse_from_rfc3339(followed_at)
         .map(|dt| dt.with_timezone(&chrono::Utc))
         .ok();
 
-    // Upsert cache
-    sqlx::query(
-        "INSERT INTO user_channel_cache (twitch_user_id, broadcaster_id, is_following, followed_at, fetched_at) \
-         VALUES ($1, $2, true, $3, now()) \
-         ON CONFLICT (twitch_user_id, broadcaster_id) DO UPDATE SET \
-         is_following = true, followed_at = COALESCE($3, user_channel_cache.followed_at), fetched_at = now()",
+    // Upsert cache. A linked member can lack a row for this channel (they
+    // joined its server after linking), so this still inserts.
+    if let Err(e) = sqlx::query(
+        "INSERT INTO user_channel_cache (twitch_user_id, broadcaster_id, is_following, followed_at, fetched_at)          VALUES ($1, $2, true, $3, now())          ON CONFLICT (twitch_user_id, broadcaster_id) DO UPDATE SET          is_following = true, followed_at = COALESCE($3, user_channel_cache.followed_at), fetched_at = now()",
     )
     .bind(user_id)
     .bind(broadcaster_id)
     .bind(followed_at_ts)
     .execute(&state.pool)
     .await
-    .ok();
+    {
+        tracing::warn!(user_id, broadcaster_id, "EventSub follow not stored: {e}");
+        return;
+    }
 
-    // Trigger sync if user is linked
-    trigger_sync_for_twitch_user(user_id, state).await;
+    send_sync(discord_id, state).await;
 
     tracing::debug!(user_id, broadcaster_id, "EventSub: user followed");
 }
@@ -160,26 +187,29 @@ async fn handle_subscribe(event: &serde_json::Value, state: &AppState) {
         Some(id) => id,
         None => return,
     };
+    let Some(discord_id) = linked_discord_id(user_id, state).await else {
+        return;
+    };
     let tier: i32 = event["tier"]
         .as_str()
         .and_then(|s| s.parse().ok())
         .unwrap_or(0);
 
     // Upsert cache
-    sqlx::query(
-        "INSERT INTO user_channel_cache (twitch_user_id, broadcaster_id, is_subscribed, sub_tier, fetched_at) \
-         VALUES ($1, $2, true, $3, now()) \
-         ON CONFLICT (twitch_user_id, broadcaster_id) DO UPDATE SET \
-         is_subscribed = true, sub_tier = $3, fetched_at = now()",
+    if let Err(e) = sqlx::query(
+        "INSERT INTO user_channel_cache (twitch_user_id, broadcaster_id, is_subscribed, sub_tier, fetched_at)          VALUES ($1, $2, true, $3, now())          ON CONFLICT (twitch_user_id, broadcaster_id) DO UPDATE SET          is_subscribed = true, sub_tier = $3, fetched_at = now()",
     )
     .bind(user_id)
     .bind(broadcaster_id)
     .bind(tier)
     .execute(&state.pool)
     .await
-    .ok();
+    {
+        tracing::warn!(user_id, broadcaster_id, "EventSub subscription not stored: {e}");
+        return;
+    }
 
-    trigger_sync_for_twitch_user(user_id, state).await;
+    send_sync(discord_id, state).await;
 
     tracing::debug!(user_id, broadcaster_id, tier, "EventSub: user subscribed");
 }
@@ -193,38 +223,24 @@ async fn handle_subscription_end(event: &serde_json::Value, state: &AppState) {
         Some(id) => id,
         None => return,
     };
+    let Some(discord_id) = linked_discord_id(user_id, state).await else {
+        return;
+    };
 
     // Update cache
-    sqlx::query(
-        "UPDATE user_channel_cache SET is_subscribed = false, sub_tier = 0, fetched_at = now() \
-         WHERE twitch_user_id = $1 AND broadcaster_id = $2",
+    if let Err(e) = sqlx::query(
+        "UPDATE user_channel_cache SET is_subscribed = false, sub_tier = 0, fetched_at = now()          WHERE twitch_user_id = $1 AND broadcaster_id = $2",
     )
     .bind(user_id)
     .bind(broadcaster_id)
     .execute(&state.pool)
     .await
-    .ok();
+    {
+        tracing::warn!(user_id, broadcaster_id, "EventSub subscription end not stored: {e}");
+        return;
+    }
 
-    trigger_sync_for_twitch_user(user_id, state).await;
+    send_sync(discord_id, state).await;
 
     tracing::debug!(user_id, broadcaster_id, "EventSub: subscription ended");
-}
-
-/// Look up the Discord ID for a Twitch user and trigger a sync event.
-async fn trigger_sync_for_twitch_user(twitch_user_id: &str, state: &AppState) {
-    let discord_id = sqlx::query_scalar::<_, String>(
-        "SELECT discord_id FROM linked_accounts WHERE twitch_user_id = $1",
-    )
-    .bind(twitch_user_id)
-    .fetch_optional(&state.pool)
-    .await
-    .ok()
-    .flatten();
-
-    if let Some(discord_id) = discord_id {
-        let _ = state
-            .user_sync_tx
-            .send(UserSyncEvent::UserUpdated { discord_id })
-            .await;
-    }
 }

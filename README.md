@@ -121,10 +121,14 @@ network or server error is retried with backoff.
 - **Follows, new subs and ended subs** arrive through EventSub, so roles change
   within seconds. Linking also checks the member inline, so their role lands
   before the page reloads.
-- **Unfollows** have no EventSub event. The refresh worker re-checks every
-  linked member on a schedule: members holding one of this plugin's roles every
-  30 minutes (longer only past ~3,600 linked member–channel pairs), others six
-  times less often. Follow age is re-evaluated on the same re-checks.
+- **Unfollows** have no EventSub event, so the refresh worker asks Twitch again
+  on a schedule. A member holding a role whose rule reads the follow is
+  re-checked every 10 minutes with a single follow lookup, and their roles are
+  re-synced only if the answer changed. Every linked member also gets a full
+  check (follow, subscription, roles re-synced regardless) every 3 hours; that
+  is the pass that re-evaluates follow age and catches a missed event. Both
+  intervals stretch on their own past roughly 2,000 role-holding members or
+  10,000 linked member–channel pairs, to stay inside 4 Twitch calls a second.
 - Members can press **Re-check now** on the verify page (opening it does the
   same), at most once a minute.
 - Cancelling on Twitch's consent screen, or a Twitch account already linked to

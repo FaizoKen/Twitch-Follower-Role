@@ -17,8 +17,9 @@ use crate::AppState;
 const SESSION_COOKIE: &str = "rl_session";
 
 /// How far ahead to schedule the next background refresh after the inline check
-/// done at link time, when the user already qualifies (follows/subs). Matches
-/// the worker's 30-min floor so we don't immediately re-spend API budget.
+/// done at link time, when the user already qualifies (follows/subs). This is
+/// an upper bound only: once the role is granted the refresh worker re-checks
+/// the follow on its own fast cadence, whatever is written here.
 const INITIAL_RECHECK_SECS: i64 = 1800;
 
 fn get_session(jar: &CookieJar, secret: &str) -> Result<(String, String), AppError> {
@@ -703,7 +704,8 @@ pub async fn twitch_callback(
             match sqlx::query(
                 "UPDATE user_channel_cache SET \
                  is_following = $1, followed_at = $2, is_subscribed = $3, sub_tier = $4, \
-                 fetched_at = now(), next_fetch_at = $5, fetch_failures = 0 \
+                 fetched_at = now(), full_fetched_at = now(), \
+                 next_fetch_at = $5, fetch_failures = 0 \
                  WHERE twitch_user_id = $6 AND broadcaster_id = $7",
             )
             .bind(is_following)
@@ -812,7 +814,8 @@ const REFRESH_COOLDOWN_SECS: f64 = 60.0;
 /// every connected broadcaster gets re-fetched ahead of schedule and their
 /// roles are corrected — no unlink/re-link needed. We don't fetch inline
 /// (that would bypass the rate limiter); we just bring `next_fetch_at`
-/// forward for the user's cache rows that aren't already fresh, and the
+/// forward for the user's cache rows that aren't already fresh (clearing
+/// `full_fetched_at` so the subscription is fetched too, not just the follow), and the
 /// refresh worker re-syncs roles after it re-checks.
 pub async fn refresh(
     State(state): State<Arc<AppState>>,
@@ -821,7 +824,7 @@ pub async fn refresh(
     let (discord_id, _) = get_session(&jar, &state.config.session_secret)?;
 
     let affected = sqlx::query(
-        "UPDATE user_channel_cache ucc SET next_fetch_at = now() \
+        "UPDATE user_channel_cache ucc SET next_fetch_at = now(), full_fetched_at = NULL \
          FROM linked_accounts la \
          WHERE la.discord_id = $1 \
            AND ucc.twitch_user_id = la.twitch_user_id \
