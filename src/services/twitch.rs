@@ -261,6 +261,42 @@ impl TwitchClient {
 
     // --- Helix API methods ---
 
+    /// Ask Twitch whether an access token is still good and what it may do.
+    /// `Ok(None)` means Twitch refused the token (expired or revoked);
+    /// `Ok(Some(scopes))` lists what it was granted.
+    pub async fn validate_token(
+        &self,
+        access_token: &str,
+    ) -> Result<Option<Vec<String>>, AppError> {
+        #[derive(serde::Deserialize)]
+        struct Validated {
+            #[serde(default)]
+            scopes: Vec<String>,
+        }
+        let resp = self
+            .http
+            .get("https://id.twitch.tv/oauth2/validate")
+            .header("Authorization", format!("OAuth {access_token}"))
+            .send()
+            .await
+            .map_err(|e| AppError::TwitchApi(format!("Validate token failed: {e}")))?;
+        let status = resp.status();
+        if status == reqwest::StatusCode::UNAUTHORIZED {
+            return Ok(None);
+        }
+        if !status.is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            return Err(AppError::TwitchApi(format!(
+                "Validate token failed: {status} - {body}"
+            )));
+        }
+        let v: Validated = resp
+            .json()
+            .await
+            .map_err(|e| AppError::TwitchApi(format!("Validate token parse failed: {e}")))?;
+        Ok(Some(v.scopes))
+    }
+
     /// Get the authenticated user's info. Returns TwitchUser.
     pub async fn get_user_by_token(&self, access_token: &str) -> Result<TwitchUser, AppError> {
         let resp: HelixResponse<TwitchUser> = self

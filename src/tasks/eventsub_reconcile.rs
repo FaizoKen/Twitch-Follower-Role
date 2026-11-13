@@ -24,6 +24,7 @@ use std::time::{Duration, Instant};
 use chrono::{DateTime, Utc};
 
 use crate::error::AppError;
+use crate::routes::admin::BROADCASTER_SCOPES;
 use crate::routes::broadcaster::{eventsub_callback_url, eventsub_condition, EVENTSUB_TYPES};
 use crate::services::twitch::{CreateSubscription, ListedSubscription};
 use crate::AppState;
@@ -58,6 +59,7 @@ pub async fn run(state: Arc<AppState>) {
                 failed = summary.failed,
                 deferred = summary.deferred,
                 other_callbacks = summary.other_callbacks,
+                grants_dropped = summary.grants_dropped,
                 "EventSub reconcile"
             ),
             Err(e) => tracing::warn!("EventSub reconcile failed: {e}"),
@@ -87,6 +89,9 @@ struct Summary {
     /// Webhook subscriptions of this client pointing elsewhere (another
     /// environment); listed for visibility, never touched.
     other_callbacks: usize,
+    /// Channels whose stored connection Twitch no longer honours, now
+    /// dropped so the owner is told to reconnect.
+    grants_dropped: usize,
 }
 
 /// What a run should do.
@@ -213,6 +218,7 @@ async fn reconcile(state: &AppState) -> Result<Summary, AppError> {
         })
         .collect();
 
+    let mut refused: HashSet<String> = HashSet::new();
     summary.deferred = plan.create.len().saturating_sub(MAX_CREATES_PER_RUN);
     for (event_type, version, channel) in plan.create.into_iter().take(MAX_CREATES_PER_RUN) {
         twitch.wait_for_permit().await;
@@ -233,10 +239,11 @@ async fn reconcile(state: &AppState) -> Result<Summary, AppError> {
             // Created between our list and now (a channel connecting). The
             // next run records it.
             Ok(CreateSubscription::AlreadyExists) => summary.already_existed += 1,
-            // The broadcaster's grant no longer covers this. Their token is
-            // about to fail too, and the refresh worker then drops it, which
-            // takes the channel out of `wanted`.
-            Ok(CreateSubscription::NotAuthorized) => summary.not_authorized += 1,
+            // The broadcaster's grant no longer covers this; checked below.
+            Ok(CreateSubscription::NotAuthorized) => {
+                summary.not_authorized += 1;
+                refused.insert(channel);
+            }
             Err(e) => {
                 summary.failed += 1;
                 tracing::debug!(channel, event_type, "EventSub create failed: {e}");
@@ -244,6 +251,24 @@ async fn reconcile(state: &AppState) -> Result<Summary, AppError> {
         }
     }
     summary.live = record.len();
+
+    let mut refused: Vec<String> = refused.into_iter().collect();
+    refused.sort();
+    for channel in refused {
+        match check_grant(state, &channel).await {
+            Ok(Grant::Gone(why)) => {
+                drop_channel_tokens(state, &channel).await?;
+                summary.grants_dropped += 1;
+                tracing::info!(
+                    channel,
+                    why,
+                    "Dropped a Twitch connection Twitch no longer honours"
+                );
+            }
+            Ok(Grant::Fine | Grant::Undecided) => {}
+            Err(e) => tracing::debug!(channel, "Could not check a refused channel's grant: {e}"),
+        }
+    }
 
     let mut tx = state.pool.begin().await?;
     sqlx::query("DELETE FROM eventsub_subscriptions")
@@ -265,6 +290,102 @@ async fn reconcile(state: &AppState) -> Result<Summary, AppError> {
     tx.commit().await?;
 
     Ok(summary)
+}
+
+/// What Twitch says about a channel whose subscriptions it refused.
+enum Grant {
+    /// Valid and complete; the refusal was something else.
+    Fine,
+    /// Revoked, or missing a scope this plugin needs: only a new sign-in helps.
+    Gone(&'static str),
+    /// Can't tell without refreshing a token the refresh worker may be using.
+    Undecided,
+}
+
+/// Whether a grant lacks any scope this plugin needs.
+fn missing_scope(scopes: &[String]) -> bool {
+    BROADCASTER_SCOPES
+        .split(' ')
+        .any(|need| !scopes.iter().any(|s| s == need))
+}
+
+/// A refused subscription means the broadcaster's grant no longer covers the
+/// type. Nothing else would notice for a channel no linked member follows:
+/// the refresh worker only spends its token on members' rows, so a revoked
+/// grant there sat looking connected while every new member got nothing.
+///
+/// The access token is checked first (read-only). An expired one is
+/// refreshed only for a channel with no member rows, because two refreshes of
+/// the same token at once (here and in the refresh worker) could cost the
+/// slower one its refresh token and disconnect a working channel; a channel
+/// with rows is left to the worker, which refreshes on its next 401.
+async fn check_grant(state: &AppState, channel: &str) -> Result<Grant, AppError> {
+    let twitch = &state.twitch_client;
+    let tokens: Option<(String, String)> = sqlx::query_as(
+        "SELECT broadcaster_access_token, broadcaster_refresh_token FROM role_links          WHERE broadcaster_id = $1 AND broadcaster_access_token IS NOT NULL            AND broadcaster_refresh_token IS NOT NULL LIMIT 1",
+    )
+    .bind(channel)
+    .fetch_optional(&state.pool)
+    .await?;
+    let Some((access, refresh)) = tokens else {
+        return Ok(Grant::Undecided);
+    };
+
+    twitch.wait_for_permit().await;
+    if let Some(scopes) = twitch.validate_token(&access).await? {
+        return Ok(if missing_scope(&scopes) {
+            Grant::Gone("missing scope")
+        } else {
+            Grant::Fine
+        });
+    }
+
+    let polled: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM user_channel_cache WHERE broadcaster_id = $1)",
+    )
+    .bind(channel)
+    .fetch_one(&state.pool)
+    .await?;
+    if polled {
+        return Ok(Grant::Undecided);
+    }
+
+    twitch.wait_for_permit().await;
+    let (new_access, new_refresh) = match twitch.refresh_token(&refresh).await {
+        Ok(pair) => pair,
+        Err(AppError::TwitchTokenRevoked(_)) => return Ok(Grant::Gone("revoked")),
+        Err(e) => return Err(e),
+    };
+    // Only if nobody replaced the tokens meanwhile.
+    sqlx::query(
+        "UPDATE role_links SET broadcaster_access_token = $1, broadcaster_refresh_token = $2          WHERE broadcaster_id = $3 AND broadcaster_refresh_token = $4",
+    )
+    .bind(&new_access)
+    .bind(&new_refresh)
+    .bind(channel)
+    .bind(&refresh)
+    .execute(&state.pool)
+    .await?;
+
+    twitch.wait_for_permit().await;
+    Ok(match twitch.validate_token(&new_access).await? {
+        Some(scopes) if missing_scope(&scopes) => Grant::Gone("missing scope"),
+        Some(_) => Grant::Fine,
+        None => Grant::Gone("refused after refresh"),
+    })
+}
+
+/// The same drop the refresh worker makes: every link of the channel loses
+/// its tokens, the settings page says "needs reconnecting", and the notice
+/// worker tells RoleLogic's dashboard.
+async fn drop_channel_tokens(state: &AppState, channel: &str) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "UPDATE role_links SET broadcaster_access_token = NULL, broadcaster_refresh_token = NULL          WHERE broadcaster_id = $1",
+    )
+    .bind(channel)
+    .execute(&state.pool)
+    .await?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -406,6 +527,17 @@ mod tests {
         let p = plan(vec![v1], &wanted(&["A"]), Utc::now());
         assert_eq!(p.delete, vec!["1"]);
         assert!(p.create.contains(&("channel.follow", "2", "A".to_string())));
+    }
+
+    #[test]
+    fn a_grant_needs_both_scopes() {
+        let s = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+        assert!(!missing_scope(&s(&[
+            "moderator:read:followers",
+            "channel:read:subscriptions"
+        ])));
+        assert!(missing_scope(&s(&["moderator:read:followers"])));
+        assert!(missing_scope(&s(&[])));
     }
 
     #[test]

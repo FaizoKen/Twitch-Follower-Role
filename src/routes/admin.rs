@@ -35,7 +35,7 @@ const ROLE_CONFIG_TEMPLATE: &str = include_str!("../../templates/role_config.htm
 
 /// Twitch OAuth scopes the broadcaster grants so we can read followers and
 /// subscriptions for their channel.
-const BROADCASTER_SCOPES: &str = "moderator:read:followers channel:read:subscriptions";
+pub(crate) const BROADCASTER_SCOPES: &str = "moderator:read:followers channel:read:subscriptions";
 
 /// 32-char lowercase alphanumeric OAuth `state` token.
 fn new_state_token() -> String {
