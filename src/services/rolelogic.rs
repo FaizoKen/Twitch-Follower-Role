@@ -55,9 +55,12 @@ fn send_failed_transiently(e: &reqwest::Error) -> bool {
 }
 
 /// An answer from the edge rather than from RoleLogic: Cloudflare or the
-/// tunnel could not reach the API, or it was restarting.
+/// tunnel could not reach the API, or it was restarting. Besides 502–504 that
+/// is Cloudflare's own 520–523 and 530 (prod Nov 2026: three adds and removes
+/// in a month ended on a 520 the API never saw). 524 is left out for the
+/// reason a timeout is: the API may still be running the request.
 fn edge_unavailable(status: reqwest::StatusCode) -> bool {
-    matches!(status.as_u16(), 502..=504)
+    matches!(status.as_u16(), 502..=504 | 520..=523 | 530)
 }
 
 /// What happened to a notice sent to RoleLogic.
@@ -653,6 +656,23 @@ mod tests {
             std::io::Error::other("connection refused"),
         );
         assert_eq!(with_causes(&echo), "connection refused");
+    }
+
+    #[test]
+    fn edge_failures_are_resent_and_answers_are_not() {
+        for code in [502, 503, 504, 520, 521, 522, 523, 530] {
+            assert!(
+                edge_unavailable(StatusCode::from_u16(code).unwrap()),
+                "{code}"
+            );
+        }
+        // 524: the API may still be running it. The rest are RoleLogic's answer.
+        for code in [400, 403, 404, 409, 429, 500, 524] {
+            assert!(
+                !edge_unavailable(StatusCode::from_u16(code).unwrap()),
+                "{code}"
+            );
+        }
     }
 
     #[test]
